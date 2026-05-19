@@ -523,7 +523,7 @@ def _load_audio(audio_bytes: bytes):
                     os.unlink(p)
 
     # ffmpeg байхгүй бол librosa-р шууд уншина
-    y, sr = librosa.load(io.BytesIO(audio_bytes), mono=True, sr=None)
+    y, sr = librosa.load(io.BytesIO(audio_bytes), mono=True, sr=16000)
     print(f"[LOAD] librosa OK sr={sr}")
     return y, sr
 
