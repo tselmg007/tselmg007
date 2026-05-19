@@ -491,7 +491,7 @@ def _detect_format(header: bytes) -> str:
     return 'wav'
 
 
-_FFMPEG = shutil.which("ffmpeg") or r"C:\Users\tselm\Documents\PROGRAM\AI_BE\ffmpeg_bin\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe"
+_FFMPEG = shutil.which("ffmpeg")
 
 
 def _load_audio(audio_bytes: bytes):
