@@ -523,11 +523,11 @@ def _load_audio(audio_bytes: bytes):
                 tmp_in = f.name
             tmp_out = tmp_in + "_out.wav"
             result = subprocess.run(
-                [_FFMPEG, "-y", "-i", tmp_in, "-ar", "16000", "-ac", "1", "-f", "wav", tmp_out],
+                [_FFMPEG, "-y", "-i", tmp_in, "-ar", "22050", "-ac", "1", "-f", "wav", tmp_out],
                 capture_output=True,
             )
             if result.returncode == 0:
-                y, sr = librosa.load(tmp_out, mono=True, sr=None)
+                y, sr = librosa.load(tmp_out, mono=True, sr=16000, duration=120)
                 print(f"[LOAD] ffmpeg OK sr={sr}")
                 return y, sr
             print(f"[LOAD] ffmpeg error: {result.stderr[-200:].decode(errors='ignore')}")
@@ -537,6 +537,15 @@ def _load_audio(audio_bytes: bytes):
             for p in [tmp_in, tmp_out]:
                 if p and os.path.exists(p):
                     os.unlink(p)
+
+    try:
+        import soundfile as sf
+        y, sr = sf.read(io.BytesIO(audio_bytes))
+        y = y.mean(axis=1) if y.ndim > 1 else y
+        print(f"[LOAD] soundfile OK sr={sr}")
+        return y, sr
+    except Exception as e:
+        print(f"[LOAD] soundfile failed: {e}")
 
     y, sr = librosa.load(io.BytesIO(audio_bytes), mono=True, sr=16000, duration=120)
     print(f"[LOAD] librosa OK sr={sr}")
