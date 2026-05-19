@@ -1,7 +1,6 @@
 """
 Guitar Skill Level Analyzer — Pure Local Backend v3
 ====================================================
-Гадаад API (Claude, OpenAI гэх мэт) огт хэрэглэхгүй.
 Бүх шинжилгээ librosa + numpy + дүрмэд суурилсан алгоритмаар
 серверийн дотоодод гүйцэтгэгдэнэ.
 
@@ -11,17 +10,34 @@ Guitar Skill Level Analyzer — Pure Local Backend v3
 Ажиллуулах:
     uvicorn main:app --reload --port 8000
 """
-
 import io
+import os
+import subprocess
+import tempfile
 import warnings
 from dataclasses import dataclass, asdict
-from typing import Optional
 
 import librosa
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
 from pydantic import BaseModel
+
+import requests as http_requests
+
+from db import get_db, create_tables, User
+from auth import (
+    hash_password, verify_password,
+    create_access_token, decode_access_token,
+    RegisterRequest, LoginRequest, TokenResponse,
+    UserResponse, RegisterResponse,
+    UpdateProfileRequest, ProfileResponse,
+    GoogleLoginRequest,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+)
+from datetime import timedelta
 
 warnings.filterwarnings("ignore")
 
@@ -30,12 +46,22 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Guitar Skill Analyzer — Local",
-    description="Гадаад API-гүй, бүх шинжилгээ дотоодод librosa + алгоритмаар",
-    version="3.0.0",
+    description="Гадаад API-гүй, бүх шинжилгээ librosa + алгоритмаар. User auth багтсан.",
+    version="4.0.0",
 )
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+# DB таблуудыг эхлүүлэхэд үүсгэнэ
+@app.on_event("startup")
+def startup():
+    create_tables()
 
 MAX_FILE_MB = 300
 SUPPORTED_CT = {
@@ -43,6 +69,351 @@ SUPPORTED_CT = {
     "audio/mp4", "audio/m4a", "audio/ogg", "audio/webm",
     "audio/flac", "audio/x-flac", "application/octet-stream",
 }
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auth Helper — одоогийн хэрэглэгчийг токеноос авна
+# ─────────────────────────────────────────────────────────────────────────────
+def get_current_user(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Токен хүчингүй эсвэл дууссан.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+    if not auth_header:
+        raise credentials_exception
+    token = auth_header.removeprefix("Bearer ").removeprefix("bearer ").strip()
+    if not token:
+        raise credentials_exception
+    payload = decode_access_token(token)
+    if payload is None:
+        raise credentials_exception
+
+    user_id: int = payload.get("sub")
+    if user_id is None:
+        raise credentials_exception
+
+    user = db.query(User).filter(User.id == int(user_id)).first()
+    if user is None or not user.is_active:
+        raise credentials_exception
+    return user
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTH ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/auth/register",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Шинэ хэрэглэгч бүртгэх",
+    tags=["Auth"],
+)
+def register(req: RegisterRequest, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == req.username).first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"'{req.username}' username аль хэдийн бүртгэлтэй.",
+        )
+    if db.query(User).filter(User.email == req.email).first():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"'{req.email}' email аль хэдийн бүртгэлтэй.",
+        )
+
+    new_user = User(
+        username=req.username,
+        email=req.email,
+        first_name=req.firstName,
+        last_name=req.lastName,
+        phone=req.phone,
+        birth_date=req.birthDate,
+        hashed_password=hash_password(req.password),
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    token = create_access_token(
+        data={"sub": str(new_user.id)},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    return TokenResponse(
+        token=token,
+        id=new_user.id,
+        username=new_user.username,
+        email=new_user.email,
+        firstName=new_user.first_name or "",
+        lastName=new_user.last_name or "",
+        phone=new_user.phone or "",
+        birthDate=new_user.birth_date or "",
+        level=new_user.level,
+    )
+
+
+@app.post(
+    "/auth/login",
+    response_model=TokenResponse,
+    summary="Нэвтрэх (JWT токен авах)",
+    tags=["Auth"],
+)
+def login(req: LoginRequest, db: Session = Depends(get_db)):
+    # Username эсвэл email-ээр хайх
+    user = (
+        db.query(User).filter(User.username == req.username_or_email).first()
+        or db.query(User).filter(User.email == req.username_or_email).first()
+    )
+
+    if not user or not verify_password(req.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Нэвтрэх нэр эсвэл нууц үг буруу.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Таны бүртгэл идэвхгүй байна.",
+        )
+
+    token = create_access_token(
+        data={"sub": str(user.id)},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    return TokenResponse(
+        token=token,
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        firstName=user.first_name or "",
+        lastName=user.last_name or "",
+        phone=user.phone or "",
+        birthDate=user.birth_date or "",
+        level=user.level,
+    )
+
+
+@app.get(
+    "/auth/me",
+    response_model=UserResponse,
+    summary="Одоогийн хэрэглэгчийн мэдээлэл",
+    tags=["Auth"],
+)
+def get_me(current_user: User = Depends(get_current_user)):
+    return UserResponse.from_orm(current_user)
+
+
+@app.post(
+    "/auth/google",
+    response_model=TokenResponse,
+    summary="Google-ээр нэвтрэх",
+    tags=["Auth"],
+)
+def google_login(req: GoogleLoginRequest, db: Session = Depends(get_db)):
+    # Google токеныг шалгана
+    resp = http_requests.get(
+        "https://oauth2.googleapis.com/tokeninfo",
+        params={"id_token": req.id_token},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google токен хүчингүй.")
+
+    info = resp.json()
+    email = info.get("email")
+    if not email:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Email авч чадсангүй.")
+
+    # Хэрэглэгч байгаа эсэхийг шалгана, байхгүй бол үүсгэнэ
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        first_name = info.get("given_name", "")
+        last_name  = info.get("family_name", "")
+        username   = email.split("@")[0]
+        # Username давхардал байвал дугаар нэмнэ
+        base, i = username, 1
+        while db.query(User).filter(User.username == username).first():
+            username = f"{base}{i}"; i += 1
+        user = User(
+            username=username,
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            hashed_password=hash_password(info.get("sub", "")),
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Бүртгэл идэвхгүй.")
+
+    token = create_access_token(
+        data={"sub": str(user.id)},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    return TokenResponse(
+        token=token,
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        firstName=user.first_name or "",
+        lastName=user.last_name or "",
+        phone=user.phone or "",
+        birthDate=user.birth_date or "",
+        level=user.level,
+    )
+
+
+@app.patch(
+    "/users/me",
+    response_model=ProfileResponse,
+    summary="Профайл мэдээлэл шинэчлэх",
+    tags=["Auth"],
+)
+def update_me(
+    req: UpdateProfileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if req.birthDate is not None:
+        current_user.birth_date = req.birthDate
+    if req.phone is not None:
+        current_user.phone = req.phone
+    if req.firstName is not None:
+        current_user.first_name = req.firstName
+    if req.lastName is not None:
+        current_user.last_name = req.lastName
+    db.commit()
+    db.refresh(current_user)
+    return ProfileResponse(
+        id=current_user.id,
+        email=current_user.email,
+        firstName=current_user.first_name or "",
+        lastName=current_user.last_name or "",
+        phone=current_user.phone or "",
+        birthDate=current_user.birth_date or "",
+        level=current_user.level,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SONGS / ASSESSMENT ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+SONGS = [
+    {"id": 1, "title": "Riptide", "artist": "Vance Joy",        "bpm": 93,  "difficulty": "Beginner"},
+    {"id": 2, "title": "As Long As You Love Me", "artist": "Justin Bieber", "bpm": 100, "difficulty": "Intermediate"},
+]
+
+LEVEL_LABEL = {1: "Beginner", 2: "Intermediate", 3: "Advanced", 4: "Professional"}
+
+
+@app.get(
+    "/songs/assessment",
+    summary="Хэрэглэгчийн одоогийн түвшин болон шинжлэх дуунуудын жагсаалт",
+    tags=["Songs"],
+)
+def get_assessment(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user_level = None
+    auth = request.headers.get("Authorization") or request.headers.get("authorization")
+    token = auth.removeprefix("Bearer ").removeprefix("bearer ").strip() if auth else None
+    if token:
+        payload = decode_access_token(token)
+        if payload:
+            user_id = payload.get("sub")
+            if user_id:
+                user = db.query(User).filter(User.id == int(user_id)).first()
+                if user:
+                    user_level = {"level": user.level, "label": LEVEL_LABEL.get(user.level, "Beginner")}
+
+    return {
+        "user_level": user_level,
+        "songs": SONGS,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GUITAR ANALYSIS ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+LEVEL_MAP = {
+    "Beginner":     1,
+    "Intermediate": 2,
+    "Advanced":     3,
+    "Professional": 4,
+}
+
+
+@app.post(
+    "/analyze",
+    summary="Guitar audio шинжилгээ (100% дотоод)",
+    description="Librosa + алгоритмаар гитарын ур чадварыг тодорхойлж хэрэглэгчийн түвшинг хадгална.",
+    tags=["Analysis"],
+)
+async def analyze_guitar(
+    request: Request,
+    audio: UploadFile = File(..., description="Guitar audio файл (wav/mp3/m4a/flac/ogg)"),
+    db: Session = Depends(get_db),
+):
+    auth = request.headers.get("Authorization") or request.headers.get("authorization")
+    token = auth.removeprefix("Bearer ").removeprefix("bearer ").strip() if auth else None
+    ct = (audio.content_type or "").lower().split(";")[0].strip()
+    print(f"[ANALYZE] content_type={ct!r} filename={audio.filename!r}")
+    if ct not in SUPPORTED_CT:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Дэмжигдэхгүй төрөл: '{ct}'. wav/mp3/m4a/flac/ogg/webm.",
+        )
+
+    audio_bytes = await audio.read()
+    size_mb = len(audio_bytes) / (1024 * 1024)
+    print(f"[ANALYZE] size={len(audio_bytes)} bytes ({size_mb:.2f} MB)")
+
+    if size_mb > MAX_FILE_MB:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Файл хэт том: {size_mb:.1f} MB. Хамгийн их {MAX_FILE_MB} MB.",
+        )
+    if len(audio_bytes) < 2000:
+        raise HTTPException(status_code=400, detail="Файл хэт жижиг эсвэл хоосон.")
+
+    try:
+        result = analyze_pipeline(audio_bytes)
+    except Exception as exc:
+        print(f"[ANALYZE] ERROR: {exc}")
+        raise HTTPException(status_code=500, detail=f"Шинжилгээний алдаа: {exc}")
+
+    if token:
+        payload = decode_access_token(token)
+        if payload:
+            user_id = payload.get("sub")
+            if user_id:
+                new_level = LEVEL_MAP.get(result.skill_level, 1)
+                db.query(User).filter(User.id == int(user_id)).update({"level": new_level})
+                db.commit()
+
+    return result
+
+
+@app.get("/health", tags=["System"])
+async def health():
+    return {"status": "ok", "version": "4.0.0", "mode": "fully-local"}
+
+
+@app.post("/debug", summary="Chroma + similarity debug", tags=["System"])
+async def debug():
+    pass  # Таны одоогийн debug логик энд байна
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,10 +473,64 @@ class RawFeatures:
     chroma_vector: list[float] = None
 
 
+def _detect_format(header: bytes) -> str:
+    """Файлын header-оор аудио форматыг тодорхойлно."""
+    if header[:4] == b'RIFF':
+        return 'wav'
+    if header[:3] == b'ID3' or header[:2] == b'\xff\xfb' or header[:2] == b'\xff\xf3' or header[:2] == b'\xff\xf2':
+        return 'mp3'
+    if header[:2] in (b'\xff\xf1', b'\xff\xf9'):
+        return 'aac'
+    if header[4:8] in (b'ftyp', b'moov') or header[:4] in (b'\x00\x00\x00\x18', b'\x00\x00\x00\x20'):
+        return 'm4a'
+    if header[:4] == b'OggS':
+        return 'ogg'
+    if header[:4] == b'fLaC':
+        return 'flac'
+    return 'wav'
+
+
+_FFMPEG = r"C:\Users\tselm\Documents\PROGRAM\AI_BE\ffmpeg_bin\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe"
+
+
+def _load_audio(audio_bytes: bytes):
+    """ffmpeg subprocess → librosa. Бүх аудио формат дэмжинэ."""
+    fmt = _detect_format(audio_bytes[:16])
+    print(f"[LOAD] detected format={fmt}")
+
+    # 1. ffmpeg subprocess-аар PCM WAV болгон хөрвүүлнэ
+    tmp_in = tmp_out = None
+    try:
+        suffix = f".{fmt}"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(audio_bytes)
+            tmp_in = f.name
+        tmp_out = tmp_in + "_out.wav"
+        result = subprocess.run(
+            [_FFMPEG, "-y", "-i", tmp_in, "-ar", "22050", "-ac", "1", "-f", "wav", tmp_out],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            y, sr = librosa.load(tmp_out, mono=True, sr=None)
+            print(f"[LOAD] ffmpeg OK sr={sr}")
+            return y, sr
+        else:
+            print(f"[LOAD] ffmpeg error: {result.stderr[-200:].decode(errors='ignore')}")
+    except Exception as e:
+        print(f"[LOAD] ffmpeg failed: {e}")
+    finally:
+        for p in [tmp_in, tmp_out]:
+            if p and os.path.exists(p):
+                os.unlink(p)
+
+    # 2. librosa fallback
+    y, sr = librosa.load(io.BytesIO(audio_bytes), mono=True, sr=None)
+    print(f"[LOAD] librosa OK sr={sr}")
+    return y, sr
+
+
 def extract_features(audio_bytes: bytes) -> RawFeatures:
-    """librosa ашиглан бүх дохионы feature-үүдийг задална."""
-    buf = io.BytesIO(audio_bytes)
-    y, sr = librosa.load(buf, mono=True, sr=None)
+    y, sr = _load_audio(audio_bytes)
 
     duration = librosa.get_duration(y=y, sr=sr)
 
@@ -577,49 +1002,7 @@ def analyze_pipeline(audio_bytes: bytes) -> SkillAnalysis:
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. ENDPOINT
 # ─────────────────────────────────────────────────────────────────────────────
-@app.post(
-    "/analyze",
-    response_model=SkillAnalysis,
-    summary="Guitar audio шинжилгээ (100% дотоод)",
-    description="Гадаад API-гүйгээр librosa + алгоритмаар гитарын ур чадварыг тодорхойлно",
-)
-async def analyze_guitar(
-    audio: UploadFile = File(..., description="Guitar audio файл (wav/mp3/m4a/flac/ogg)"),
-):
-    ct = (audio.content_type or "").lower().split(";")[0].strip()
-    if ct not in SUPPORTED_CT:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Дэмжигдэхгүй төрөл: '{ct}'. wav/mp3/m4a/flac/ogg/webm.",
-        )
 
-    audio_bytes = await audio.read()
-    size_mb = len(audio_bytes) / (1024 * 1024)
-
-    if size_mb > MAX_FILE_MB:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Файл хэт том: {size_mb:.1f} MB. Хамгийн их {MAX_FILE_MB} MB.",
-        )
-    if len(audio_bytes) < 2000:
-        raise HTTPException(status_code=400, detail="Файл хэт жижиг эсвэл хоосон.")
-
-    try:
-        return analyze_pipeline(audio_bytes)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Шинжилгээний алдаа: {exc}")
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "version": "3.1.0", "mode": "fully-local"}
-
-
-@app.post(
-    "/debug",
-    summary="Chroma + similarity debug",
-    description="Дуу таах алгоритмын дотоод оноог харуулна — тохиргоонд ашиглана",
-)
 async def debug_song(
     audio: UploadFile = File(...),
 ):

@@ -5,3 +5,11 @@ pydantic>=2.7.0
 librosa>=0.10.0
 numpy>=1.24.0
 soundfile>=0.12.1
+ 
+# ── Auth / Database ────────────────────────────────────────────────────────────
+sqlalchemy>=2.0.0
+pymysql>=1.1.0          # MySQL driver
+cryptography>=42.0.0    # pymysql-д шаардлагатай
+bcrypt>=4.0.0           # Password hashing
+python-jose[cryptography]>=3.3.0  # JWT
+pydantic[email]>=2.0.0  # EmailStr-д
