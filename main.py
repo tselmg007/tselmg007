@@ -69,6 +69,7 @@ SUPPORTED_CT = {
     "audio/mpeg", "audio/mp3", "audio/wav", "audio/wave", "audio/x-wav",
     "audio/mp4", "audio/m4a", "audio/ogg", "audio/webm",
     "audio/flac", "audio/x-flac", "application/octet-stream",
+    "audio/aac",
 }
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
