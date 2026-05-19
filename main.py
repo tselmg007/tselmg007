@@ -11,10 +11,6 @@ Guitar Skill Level Analyzer — Pure Local Backend v3
     uvicorn main:app --reload --port 8000
 """
 import io
-import os
-import shutil
-import subprocess
-import tempfile
 import warnings
 from dataclasses import dataclass, asdict
 
@@ -492,38 +488,16 @@ def _detect_format(header: bytes) -> str:
 
 
 def _load_audio(audio_bytes: bytes):
-    """librosa-р шууд уншина — ffmpeg байвал ашиглана."""
     fmt = _detect_format(audio_bytes[:16])
     print(f"[LOAD] detected format={fmt}")
 
-    ffmpeg_path = shutil.which("ffmpeg")
-
-    if ffmpeg_path:
-        tmp_in = tmp_out = None
-        try:
-            suffix = f".{fmt}"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                f.write(audio_bytes)
-                tmp_in = f.name
-            tmp_out = tmp_in + "_out.wav"
-            result = subprocess.run(
-                [ffmpeg_path, "-y", "-i", tmp_in, "-ar", "22050", "-ac", "1", "-f", "wav", tmp_out],
-                capture_output=True,
-            )
-            if result.returncode == 0:
-                y, sr = librosa.load(tmp_out, mono=True, sr=None)
-                print(f"[LOAD] ffmpeg OK sr={sr}")
-                return y, sr
-            print(f"[LOAD] ffmpeg error: {result.stderr[-200:].decode(errors='ignore')}")
-        except Exception as e:
-            print(f"[LOAD] ffmpeg failed: {e}")
-        finally:
-            for p in [tmp_in, tmp_out]:
-                if p and os.path.exists(p):
-                    os.unlink(p)
-
-    # ffmpeg байхгүй бол librosa-р шууд уншина
-    y, sr = librosa.load(io.BytesIO(audio_bytes), mono=True, sr=16000)
+    y, sr = librosa.load(
+        io.BytesIO(audio_bytes),
+        mono=True,
+        sr=16000,
+        duration=120,
+        offset=0.0,
+    )
     print(f"[LOAD] librosa OK sr={sr}")
     return y, sr
 
