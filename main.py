@@ -11,6 +11,10 @@ Guitar Skill Level Analyzer — Pure Local Backend v3
     uvicorn main:app --reload --port 8000
 """
 import io
+import os
+import shutil
+import subprocess
+import tempfile
 import warnings
 from dataclasses import dataclass, asdict
 
@@ -487,17 +491,54 @@ def _detect_format(header: bytes) -> str:
     return 'wav'
 
 
+def _get_ffmpeg():
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    try:
+        result = subprocess.run(
+            ["find", "/nix/store", "-name", "ffmpeg", "-type", "f"],
+            capture_output=True, text=True, timeout=10,
+        )
+        paths = [p for p in result.stdout.strip().split("\n") if p and "/bin/ffmpeg" in p]
+        if paths:
+            return paths[0]
+    except Exception:
+        pass
+    return None
+
+_FFMPEG = _get_ffmpeg()
+print(f"[FFMPEG] path={_FFMPEG}")
+
+
 def _load_audio(audio_bytes: bytes):
     fmt = _detect_format(audio_bytes[:16])
     print(f"[LOAD] detected format={fmt}")
 
-    y, sr = librosa.load(
-        io.BytesIO(audio_bytes),
-        mono=True,
-        sr=16000,
-        duration=120,
-        offset=0.0,
-    )
+    if _FFMPEG:
+        tmp_in = tmp_out = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as f:
+                f.write(audio_bytes)
+                tmp_in = f.name
+            tmp_out = tmp_in + "_out.wav"
+            result = subprocess.run(
+                [_FFMPEG, "-y", "-i", tmp_in, "-ar", "16000", "-ac", "1", "-f", "wav", tmp_out],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                y, sr = librosa.load(tmp_out, mono=True, sr=None)
+                print(f"[LOAD] ffmpeg OK sr={sr}")
+                return y, sr
+            print(f"[LOAD] ffmpeg error: {result.stderr[-200:].decode(errors='ignore')}")
+        except Exception as e:
+            print(f"[LOAD] ffmpeg failed: {e}")
+        finally:
+            for p in [tmp_in, tmp_out]:
+                if p and os.path.exists(p):
+                    os.unlink(p)
+
+    y, sr = librosa.load(io.BytesIO(audio_bytes), mono=True, sr=16000, duration=120)
     print(f"[LOAD] librosa OK sr={sr}")
     return y, sr
 
