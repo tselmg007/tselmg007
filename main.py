@@ -491,40 +491,38 @@ def _detect_format(header: bytes) -> str:
     return 'wav'
 
 
-_FFMPEG = shutil.which("ffmpeg")
-
-
 def _load_audio(audio_bytes: bytes):
-    """ffmpeg subprocess → librosa. Бүх аудио формат дэмжинэ."""
+    """librosa-р шууд уншина — ffmpeg байвал ашиглана."""
     fmt = _detect_format(audio_bytes[:16])
     print(f"[LOAD] detected format={fmt}")
 
-    # 1. ffmpeg subprocess-аар PCM WAV болгон хөрвүүлнэ
-    tmp_in = tmp_out = None
-    try:
-        suffix = f".{fmt}"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-            f.write(audio_bytes)
-            tmp_in = f.name
-        tmp_out = tmp_in + "_out.wav"
-        result = subprocess.run(
-            [_FFMPEG, "-y", "-i", tmp_in, "-ar", "22050", "-ac", "1", "-f", "wav", tmp_out],
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            y, sr = librosa.load(tmp_out, mono=True, sr=None)
-            print(f"[LOAD] ffmpeg OK sr={sr}")
-            return y, sr
-        else:
-            print(f"[LOAD] ffmpeg error: {result.stderr[-200:].decode(errors='ignore')}")
-    except Exception as e:
-        print(f"[LOAD] ffmpeg failed: {e}")
-    finally:
-        for p in [tmp_in, tmp_out]:
-            if p and os.path.exists(p):
-                os.unlink(p)
+    ffmpeg_path = shutil.which("ffmpeg")
 
-    # 2. librosa fallback
+    if ffmpeg_path:
+        tmp_in = tmp_out = None
+        try:
+            suffix = f".{fmt}"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                f.write(audio_bytes)
+                tmp_in = f.name
+            tmp_out = tmp_in + "_out.wav"
+            result = subprocess.run(
+                [ffmpeg_path, "-y", "-i", tmp_in, "-ar", "22050", "-ac", "1", "-f", "wav", tmp_out],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                y, sr = librosa.load(tmp_out, mono=True, sr=None)
+                print(f"[LOAD] ffmpeg OK sr={sr}")
+                return y, sr
+            print(f"[LOAD] ffmpeg error: {result.stderr[-200:].decode(errors='ignore')}")
+        except Exception as e:
+            print(f"[LOAD] ffmpeg failed: {e}")
+        finally:
+            for p in [tmp_in, tmp_out]:
+                if p and os.path.exists(p):
+                    os.unlink(p)
+
+    # ffmpeg байхгүй бол librosa-р шууд уншина
     y, sr = librosa.load(io.BytesIO(audio_bytes), mono=True, sr=None)
     print(f"[LOAD] librosa OK sr={sr}")
     return y, sr
