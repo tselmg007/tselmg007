@@ -12,6 +12,7 @@ Guitar Skill Level Analyzer — Pure Local Backend v3
 """
 import io
 import os
+import shutil
 import subprocess
 import tempfile
 import warnings
@@ -490,7 +491,7 @@ def _detect_format(header: bytes) -> str:
     return 'wav'
 
 
-_FFMPEG = r"C:\Users\tselm\Documents\PROGRAM\AI_BE\ffmpeg_bin\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe"
+_FFMPEG = shutil.which("ffmpeg") or r"C:\Users\tselm\Documents\PROGRAM\AI_BE\ffmpeg_bin\ffmpeg-master-latest-win64-gpl\bin\ffmpeg.exe"
 
 
 def _load_audio(audio_bytes: bytes):
