@@ -63,6 +63,9 @@ app.add_middleware(
 @app.on_event("startup")
 def startup():
     create_tables()
+    # ffmpeg шалгах
+    ffmpeg = _get_ffmpeg()
+    print(f"[STARTUP] ffmpeg path: {ffmpeg}")
 
 MAX_FILE_MB = 50
 SUPPORTED_CT = {
