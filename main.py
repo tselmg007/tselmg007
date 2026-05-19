@@ -64,7 +64,7 @@ app.add_middleware(
 def startup():
     create_tables()
 
-MAX_FILE_MB = 300
+MAX_FILE_MB = 50
 SUPPORTED_CT = {
     "audio/mpeg", "audio/mp3", "audio/wav", "audio/wave", "audio/x-wav",
     "audio/mp4", "audio/m4a", "audio/ogg", "audio/webm",
