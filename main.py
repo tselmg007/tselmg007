@@ -499,6 +499,10 @@ def _get_ffmpeg():
     path = shutil.which("ffmpeg")
     if path:
         return path
+    # Windows локал зам
+    local_ffmpeg = os.path.join(os.path.dirname(__file__), "ffmpeg", "ffmpeg-master-latest-win64-gpl", "bin", "ffmpeg.exe")
+    if os.path.isfile(local_ffmpeg):
+        return local_ffmpeg
     try:
         result = subprocess.run(
             ["find", "/nix/store", "-name", "ffmpeg", "-type", "f"],
@@ -798,13 +802,6 @@ def _bpm_score(detected: float, target: float, tol: float = 12.0) -> float:
 
 
 def detect_song(f: RawFeatures) -> str:
-    """
-    Chord profile cosine similarity + BPM ойролцоо байдлаар дуу таана.
-
-    Chord chart-д суурилсан RIPTIDE_PROFILE болон ALAYLM_PROFILE-тэй
-    хэрэглэгчийн chroma vector-ийг харьцуулна.
-    Cosine similarity 70%, BPM оноо 30% жинтэй.
-    """
     if not f.chroma_vector:
         return "Тодорхойгүй"
 
