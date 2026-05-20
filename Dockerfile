@@ -1,6 +1,5 @@
 ﻿FROM python:3.11-slim
 
-# ffmpeg суулгах
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
