@@ -6,30 +6,38 @@ import os
 import sys
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MySQL — Railway environment variables-аас уншина
-# localhost default утга байхгүй — variables заавал тохируулсан байх ёстой
+# MySQL — MYSQL_URL-аас шууд уншина (Railway-н хамгийн найдвартай арга)
 # ─────────────────────────────────────────────────────────────────────────────
-DB_HOST = os.getenv("DB_HOST") or os.getenv("MYSQLHOST")
-DB_PORT = os.getenv("DB_PORT") or os.getenv("MYSQLPORT", "3306")
-DB_NAME = os.getenv("DB_NAME") or os.getenv("MYSQLDATABASE")
-DB_USER = os.getenv("DB_USER") or os.getenv("MYSQLUSER")
-DB_PASS = os.getenv("DB_PASS") or os.getenv("MYSQLPASSWORD")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL")
 
-# Variables тохируулагдаагүй бол startup-д тодорхой алдаа гаргана
-missing = [k for k, v in {
-    "DB_HOST": DB_HOST,
-    "DB_NAME": DB_NAME,
-    "DB_USER": DB_USER,
-    "DB_PASS": DB_PASS,
-}.items() if not v]
+if DATABASE_URL:
+    # mysql:// → mysql+pymysql:// болгоно
+    if DATABASE_URL.startswith("mysql://"):
+        DATABASE_URL = DATABASE_URL.replace("mysql://", "mysql+pymysql://", 1)
+    print(f"[DB] Connecting → {DATABASE_URL.split('@')[-1]}", flush=True)
 
-if missing:
-    print(f"[DB] АЛДАА: Тохируулагдаагүй variables: {missing}", flush=True)
-    print("[DB] Railway → Variables дээр DB_HOST, DB_NAME, DB_USER, DB_PASS нэмнэ үү.", flush=True)
-    sys.exit(1)
+else:
+    # DATABASE_URL байхгүй бол хувь хувийн variables-аас үүсгэнэ
+    DB_HOST = os.getenv("DB_HOST") or os.getenv("MYSQLHOST")
+    DB_PORT = os.getenv("DB_PORT") or os.getenv("MYSQLPORT", "3306")
+    DB_NAME = os.getenv("DB_NAME") or os.getenv("MYSQLDATABASE")
+    DB_USER = os.getenv("DB_USER") or os.getenv("MYSQLUSER")
+    DB_PASS = os.getenv("DB_PASS") or os.getenv("MYSQLPASSWORD")
 
-DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-print(f"[DB] Connecting → {DB_HOST}:{DB_PORT}/{DB_NAME} (user={DB_USER})", flush=True)
+    missing = [k for k, v in {
+        "DB_HOST": DB_HOST,
+        "DB_NAME": DB_NAME,
+        "DB_USER": DB_USER,
+        "DB_PASS": DB_PASS,
+    }.items() if not v]
+
+    if missing:
+        print(f"[DB] АЛДАА: Тохируулагдаагүй variables: {missing}", flush=True)
+        print("[DB] Railway → Variables дээр DATABASE_URL=${{MySQL.MYSQL_URL}} нэмнэ үү.", flush=True)
+        sys.exit(1)
+
+    DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    print(f"[DB] Connecting → {DB_HOST}:{DB_PORT}/{DB_NAME} (user={DB_USER})", flush=True)
 
 engine = create_engine(
     DATABASE_URL,
