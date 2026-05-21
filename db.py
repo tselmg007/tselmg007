@@ -3,23 +3,39 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import os
+import sys
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MySQL Database Configuration
+# MySQL — Railway environment variables-аас уншина
+# localhost default утга байхгүй — variables заавал тохируулсан байх ёстой
 # ─────────────────────────────────────────────────────────────────────────────
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_NAME = os.getenv("DB_NAME", "guitar_analyzer")
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASS = os.getenv("DB_PASS", "root")
+DB_HOST = os.getenv("DB_HOST") or os.getenv("MYSQLHOST")
+DB_PORT = os.getenv("DB_PORT") or os.getenv("MYSQLPORT", "3306")
+DB_NAME = os.getenv("DB_NAME") or os.getenv("MYSQLDATABASE")
+DB_USER = os.getenv("DB_USER") or os.getenv("MYSQLUSER")
+DB_PASS = os.getenv("DB_PASS") or os.getenv("MYSQLPASSWORD")
+
+# Variables тохируулагдаагүй бол startup-д тодорхой алдаа гаргана
+missing = [k for k, v in {
+    "DB_HOST": DB_HOST,
+    "DB_NAME": DB_NAME,
+    "DB_USER": DB_USER,
+    "DB_PASS": DB_PASS,
+}.items() if not v]
+
+if missing:
+    print(f"[DB] АЛДАА: Тохируулагдаагүй variables: {missing}", flush=True)
+    print("[DB] Railway → Variables дээр DB_HOST, DB_NAME, DB_USER, DB_PASS нэмнэ үү.", flush=True)
+    sys.exit(1)
 
 DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+print(f"[DB] Connecting → {DB_HOST}:{DB_PORT}/{DB_NAME} (user={DB_USER})", flush=True)
 
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,        # Connection-ийг автоматаар шалгана
-    pool_recycle=3600,         # 1 цаг тутамд холболтыг шинэчилнэ
-    echo=False,                # SQL log харахыг хүсвэл True болго
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    echo=False,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -33,7 +49,7 @@ class User(Base):
     __tablename__ = "users"
 
     id         = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    username   = Column(String(50), unique=True, nullable=False, index=True)
+    username   = Column(String(50),  unique=True, nullable=False, index=True)
     email      = Column(String(255), unique=True, nullable=False, index=True)
     full_name  = Column(String(100), nullable=True)
     first_name = Column(String(100), nullable=True)
@@ -64,3 +80,4 @@ def get_db():
 def create_tables():
     """Бүх таблуудыг үүсгэнэ (эхний ажиллуулалтад)"""
     Base.metadata.create_all(bind=engine)
+    print("[DB] Таблуудыг амжилттай үүсгэлээ.", flush=True)
