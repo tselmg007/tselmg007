@@ -414,23 +414,68 @@ async def analyze_guitar(
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 def _build_chord_profiles() -> dict:
-    """Мажор, минор, dominant7, major7, minor7 chord профайлуудыг үүсгэнэ."""
+    """
+    Root note-д хамгийн өндөр жин өгсөн chord профайл.
+    7th chord-уудыг мажор/минор-оос ялгахын тулд
+    7th нотын жинг бага, root-ын жинг өндөр болгосон.
+    """
+    profiles = {}
+
+    NOTE_NAMES_LOCAL = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+
+    interval_map = {
+        "":     [(0, 2.0), (4, 0.8), (7, 1.2)],              # Мажор: root давамгай
+        "m":    [(0, 2.0), (3, 0.8), (7, 1.2)],              # Минор
+        "7":    [(0, 1.5), (4, 0.8), (7, 1.0), (10, 1.5)],   # Dom7: 7th нот чухал
+        "maj7": [(0, 1.5), (4, 0.8), (7, 1.0), (11, 1.5)],   # Maj7: maj7th нот чухал
+        "min7": [(0, 1.5), (3, 0.8), (7, 1.0), (10, 1.5)],   # Min7
+        "sus2": [(0, 2.0), (2, 1.0), (7, 1.2)],              # Sus2
+        "sus4": [(0, 2.0), (5, 1.0), (7, 1.2)],              # Sus4
+        "dim":  [(0, 2.0), (3, 0.8), (6, 1.0)],              # Diminished
+        "aug":  [(0, 2.0), (4, 0.8), (8, 1.0)],              # Augmented
+    }
+
+    for suffix, weighted_intervals in interval_map.items():
+        for i, root in enumerate(NOTE_NAMES_LOCAL):
+            profile = np.zeros(12)
+            for interval, weight in weighted_intervals:
+                profile[(i + interval) % 12] = weight
+            profile /= profile.sum() + 1e-9
+            profiles[f"{root}{suffix}"] = profile
+
+    return profiles
+
+CHORD_PROFILES = _build_chord_profiles()
+
+
+NOTE_NAMES_CD = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+def _build_chord_profiles() -> dict:
+    """
+    Root note-д хамгийн өндөр жин өгсөн chord профайл.
+    7th chord-уудыг мажор/минор-оос ялгахын тулд
+    7th нотын жинг бага, root-ын жинг өндөр болгосон.
+    """
     profiles = {}
 
     interval_map = {
-        "":     [0, 4, 7],       # Мажор
-        "m":    [0, 3, 7],       # Минор
-        "7":    [0, 4, 7, 10],   # Dominant 7
-        "maj7": [0, 4, 7, 11],   # Major 7
-        "min7": [0, 3, 7, 10],   # Minor 7
+        "":     [(0, 2.0), (4, 0.8), (7, 1.2)],
+        "m":    [(0, 2.0), (3, 0.8), (7, 1.2)],
+        "7":    [(0, 1.5), (4, 0.8), (7, 1.0), (10, 1.5)],
+        "maj7": [(0, 1.5), (4, 0.8), (7, 1.0), (11, 1.5)],
+        "min7": [(0, 1.5), (3, 0.8), (7, 1.0), (10, 1.5)],
+        "sus2": [(0, 2.0), (2, 1.0), (7, 1.2)],
+        "sus4": [(0, 2.0), (5, 1.0), (7, 1.2)],
+        "dim":  [(0, 2.0), (3, 0.8), (6, 1.0)],
+        "aug":  [(0, 2.0), (4, 0.8), (8, 1.0)],
     }
 
-    for suffix, intervals in interval_map.items():
-        for i, root in enumerate(NOTE_NAMES):
+    for suffix, weighted_intervals in interval_map.items():
+        for i, root in enumerate(NOTE_NAMES_CD):
             profile = np.zeros(12)
-            for interval in intervals:
-                profile[(i + interval) % 12] = 1.0
-            profile /= profile.sum()
+            for interval, weight in weighted_intervals:
+                profile[(i + interval) % 12] = weight
+            profile /= profile.sum() + 1e-9
             profiles[f"{root}{suffix}"] = profile
 
     return profiles
@@ -463,6 +508,22 @@ async def detect_chord(
 
         for chord_name, profile in CHORD_PROFILES.items():
             score = _cosine(chroma, profile)
+
+            # Root note-ын chroma эрчим харгалзах
+            # Chord нэрнээс root note-ийг олно
+            raw = chord_name
+            root_name = None
+            for n in ["C#", "D#", "F#", "G#", "A#", "C", "D", "E", "F", "G", "A", "B"]:
+                if raw.startswith(n):
+                    root_name = n
+                    break
+
+            if root_name and root_name in NOTE_NAMES_CD:
+                root_idx = NOTE_NAMES_CD.index(root_name)
+                root_energy = float(chroma[root_idx])
+                # Root note чанга байвал оноо нэмэх
+                score = score * (1.0 + root_energy * 0.5)
+
             if score > best_score:
                 best_score = score
                 best_chord = chord_name
