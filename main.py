@@ -170,7 +170,6 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     tags=["Auth"],
 )
 def login(req: LoginRequest, db: Session = Depends(get_db)):
-    # Username эсвэл email-ээр хайх
     user = (
         db.query(User).filter(User.username == req.username_or_email).first()
         or db.query(User).filter(User.email == req.username_or_email).first()
@@ -222,7 +221,6 @@ def get_me(current_user: User = Depends(get_current_user)):
     tags=["Auth"],
 )
 def google_login(req: GoogleLoginRequest, db: Session = Depends(get_db)):
-    # Google токеныг шалгана
     resp = http_requests.get(
         "https://oauth2.googleapis.com/tokeninfo",
         params={"id_token": req.id_token},
@@ -236,13 +234,11 @@ def google_login(req: GoogleLoginRequest, db: Session = Depends(get_db)):
     if not email:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Email авч чадсангүй.")
 
-    # Хэрэглэгч байгаа эсэхийг шалгана, байхгүй бол үүсгэнэ
     user = db.query(User).filter(User.email == email).first()
     if not user:
         first_name = info.get("given_name", "")
         last_name  = info.get("family_name", "")
         username   = email.split("@")[0]
-        # Username давхардал байвал дугаар нэмнэ
         base, i = username, 1
         while db.query(User).filter(User.username == username).first():
             username = f"{base}{i}"; i += 1
@@ -411,6 +407,143 @@ async def analyze_guitar(
     return result
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CHORD DETECTION ROUTE
+# ─────────────────────────────────────────────────────────────────────────────
+
+NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+def _build_chord_profiles() -> dict:
+    """Мажор, минор, dominant7, major7, minor7 chord профайлуудыг үүсгэнэ."""
+    profiles = {}
+
+    interval_map = {
+        "":     [0, 4, 7],       # Мажор
+        "m":    [0, 3, 7],       # Минор
+        "7":    [0, 4, 7, 10],   # Dominant 7
+        "maj7": [0, 4, 7, 11],   # Major 7
+        "min7": [0, 3, 7, 10],   # Minor 7
+    }
+
+    for suffix, intervals in interval_map.items():
+        for i, root in enumerate(NOTE_NAMES):
+            profile = np.zeros(12)
+            for interval in intervals:
+                profile[(i + interval) % 12] = 1.0
+            profile /= profile.sum()
+            profiles[f"{root}{suffix}"] = profile
+
+    return profiles
+
+CHORD_PROFILES = _build_chord_profiles()
+
+
+@app.post(
+    "/chords/detect",
+    summary="Гитарын chord таних",
+    tags=["Chords"],
+)
+async def detect_chord(
+    audio: UploadFile = File(..., description="Audio файл (m4a/wav/mp3)"),
+):
+    ct = (audio.content_type or "").lower().split(";")[0].strip()
+    print(f"[CHORD] content_type={ct!r} filename={audio.filename!r}")
+
+    audio_bytes = await audio.read()
+
+    if len(audio_bytes) < 1000:
+        raise HTTPException(status_code=400, detail="Файл хэт жижиг.")
+
+    try:
+        f = extract_features(audio_bytes)
+        chroma = np.array(f.chroma_vector)
+
+        best_chord = "Unknown"
+        best_score = -1.0
+
+        for chord_name, profile in CHORD_PROFILES.items():
+            score = _cosine(chroma, profile)
+            if score > best_score:
+                best_score = score
+                best_chord = chord_name
+
+        confidence = round(float(best_score) * 100, 1)
+        print(f"[CHORD] detected={best_chord} confidence={confidence}%")
+
+        return {
+            "chord": best_chord,
+            "chord_name": best_chord,
+            "confidence": confidence,
+            "dominant_note": f.dominant_note,
+            "tempo_bpm": f.tempo_bpm,
+        }
+
+    except Exception as exc:
+        print(f"[CHORD] ERROR: {exc}")
+        raise HTTPException(status_code=500, detail=f"Chord detection алдаа: {exc}")
+    
+# ─────────────────────────────────────────────────────────────────────────────
+# CHORD DETECTION ROUTE
+# ─────────────────────────────────────────────────────────────────────────────
+
+NOTE_NAMES_CD = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+def _build_chord_profiles() -> dict:
+    profiles = {}
+    interval_map = {
+        "":     [0, 4, 7],
+        "m":    [0, 3, 7],
+        "7":    [0, 4, 7, 10],
+        "maj7": [0, 4, 7, 11],
+        "min7": [0, 3, 7, 10],
+    }
+    for suffix, intervals in interval_map.items():
+        for i, root in enumerate(NOTE_NAMES_CD):
+            profile = np.zeros(12)
+            for interval in intervals:
+                profile[(i + interval) % 12] = 1.0
+            profile /= profile.sum()
+            profiles[f"{root}{suffix}"] = profile
+    return profiles
+
+CHORD_PROFILES = _build_chord_profiles()
+
+
+@app.post(
+    "/chords/detect",
+    summary="Гитарын chord таних",
+    tags=["Chords"],
+)
+async def detect_chord(
+    audio: UploadFile = File(..., description="Audio файл (m4a/wav/mp3)"),
+):
+    audio_bytes = await audio.read()
+    if len(audio_bytes) < 1000:
+        raise HTTPException(status_code=400, detail="Файл хэт жижиг.")
+    try:
+        f = extract_features(audio_bytes)
+        chroma = np.array(f.chroma_vector)
+        best_chord = "Unknown"
+        best_score = -1.0
+        for chord_name, profile in CHORD_PROFILES.items():
+            score = _cosine(chroma, profile)
+            if score > best_score:
+                best_score = score
+                best_chord = chord_name
+        confidence = round(float(best_score) * 100, 1)
+        print(f"[CHORD] detected={best_chord} confidence={confidence}%")
+        return {
+            "chord": best_chord,
+            "chord_name": best_chord,
+            "confidence": confidence,
+            "dominant_note": f.dominant_note,
+            "tempo_bpm": f.tempo_bpm,
+        }
+    except Exception as exc:
+        print(f"[CHORD] ERROR: {exc}")
+        raise HTTPException(status_code=500, detail=f"Chord detection алдаа: {exc}")
+
+
 @app.get("/health", tags=["System"])
 async def health():
     return {"status": "ok", "version": "4.0.0", "mode": "fully-local"}
@@ -418,35 +551,26 @@ async def health():
 
 @app.post("/debug", summary="Chroma + similarity debug", tags=["System"])
 async def debug():
-    pass  # Таны одоогийн debug логик энд байна
+    pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Response загвар
 # ─────────────────────────────────────────────────────────────────────────────
 class SkillAnalysis(BaseModel):
-    # ── Үндсэн үнэлгээ ───────────────────────────────────────────────────────
-    skill_level: str          # Beginner / Intermediate / Advanced / Professional
-    skill_score: int          # 0–100
-    song_detected: str        # Илэрсэн дуу
-
-    # ── Бичлэгийн мэдээлэл ───────────────────────────────────────────────────
+    skill_level: str
+    skill_score: int
+    song_detected: str
     duration_seconds: float
     tempo_bpm: float
-
-    # ── Дэд оноонууд (0–100) ─────────────────────────────────────────────────
-    rhythm_score: int         # Хэмнэлийн тогтвортой байдал
-    dynamics_score: int       # Динамик хяналт
-    clarity_score: int        # Аккордын тодрол / бузрал
-    consistency_score: int    # Тогтмол цохилт (onset regularity)
-
-    # ── Тайлбар текстүүд ─────────────────────────────────────────────────────
+    rhythm_score: int
+    dynamics_score: int
+    clarity_score: int
+    consistency_score: int
     tempo_feel: str
     rhythm_accuracy: str
     chord_clarity: str
     dynamic_range: str
-
-    # ── Дэлгэрэнгүй санал ────────────────────────────────────────────────────
     strengths: list[str]
     areas_to_improve: list[str]
     practice_tips: list[str]
@@ -461,9 +585,9 @@ class RawFeatures:
     duration_sec: float
     sr: int
     tempo_bpm: float
-    rhythm_stability: float   # 0–1, 1 = төгс тогтвортой
-    onset_regularity: float   # 0–1
-    onset_rate: float         # onset/sec
+    rhythm_stability: float
+    onset_regularity: float
+    onset_rate: float
     dynamic_range_db: float
     rms_std_db: float
     silence_ratio: float
@@ -471,15 +595,13 @@ class RawFeatures:
     spectral_bandwidth_hz: float
     zero_crossing_rate: float
     dominant_note: str
-    active_note_count: int    # хэдэн нот идэвхтэй байна
-    chroma_entropy: float     # нот тархалтын жигд байдал
-    mfcc_variance: float      # тембрийн хэлбэлзэл
-    # 12 нотын дундаж chroma эрчим (C C# D D# E F F# G G# A A# B)
+    active_note_count: int
+    chroma_entropy: float
+    mfcc_variance: float
     chroma_vector: list[float] = None
 
 
 def _detect_format(header: bytes) -> str:
-    """Файлын header-оор аудио форматыг тодорхойлно."""
     if header[:4] == b'RIFF':
         return 'wav'
     if header[:3] == b'ID3' or header[:2] == b'\xff\xfb' or header[:2] == b'\xff\xf3' or header[:2] == b'\xff\xf2':
@@ -499,7 +621,6 @@ def _get_ffmpeg():
     path = shutil.which("ffmpeg")
     if path:
         return path
-    # Windows локал зам
     local_ffmpeg = os.path.join(os.path.dirname(__file__), "ffmpeg", "ffmpeg-master-latest-win64-gpl", "bin", "ffmpeg.exe")
     if os.path.isfile(local_ffmpeg):
         return local_ffmpeg
@@ -565,7 +686,6 @@ def extract_features(audio_bytes: bytes) -> RawFeatures:
 
     duration = librosa.get_duration(y=y, sr=sr)
 
-    # ── Темп & хэмнэл ────────────────────────────────────────────────────────
     tempo_arr, beats = librosa.beat.beat_track(y=y, sr=sr)
     tempo_bpm = float(np.atleast_1d(tempo_arr)[0])
     beat_times = librosa.frames_to_time(beats, sr=sr)
@@ -575,7 +695,6 @@ def extract_features(audio_bytes: bytes) -> RawFeatures:
     else:
         rhythm_stability = 0.4
 
-    # ── Onset (цохилт) ────────────────────────────────────────────────────────
     onset_frames = librosa.onset.onset_detect(y=y, sr=sr)
     onset_times = librosa.frames_to_time(onset_frames, sr=sr)
     onset_rate = len(onset_times) / max(duration, 1.0)
@@ -585,34 +704,28 @@ def extract_features(audio_bytes: bytes) -> RawFeatures:
     else:
         onset_regularity = 0.3
 
-    # ── Динамик ───────────────────────────────────────────────────────────────
     rms = librosa.feature.rms(y=y)[0]
     db  = librosa.amplitude_to_db(rms, ref=np.max)
     dynamic_range_db = float(np.max(db) - np.min(db))
     rms_std_db       = float(np.std(db))
     silence_ratio    = float(np.mean(rms < 0.005))
 
-    # ── Spectral ──────────────────────────────────────────────────────────────
     sc  = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
     sbw = librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
     zcr = librosa.feature.zero_crossing_rate(y)[0]
 
-    # ── Chroma (аккорд/нот) ───────────────────────────────────────────────────
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
     note_names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
     note_energy = {note_names[i]: float(np.mean(chroma[i])) for i in range(12)}
     dominant_note   = max(note_energy, key=note_energy.get)
     active_notes    = sum(1 for v in note_energy.values() if v > 0.25)
-    # Shannon entropy → нотын тархалт жигд үү?
     vals = np.array(list(note_energy.values())) + 1e-9
     vals /= vals.sum()
     chroma_entropy  = float(-np.sum(vals * np.log2(vals)))
 
-    # ── MFCC тембр ────────────────────────────────────────────────────────────
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
     mfcc_variance = float(np.mean(np.var(mfcc, axis=1)))
 
-    # ── Нормчилсон chroma vector (12 нот: C C# D D# E F F# G G# A A# B) ──────
     chroma_mean = np.array([float(np.mean(chroma[i])) for i in range(12)])
     norm = chroma_mean.sum() + 1e-9
     chroma_vector = [round(float(v / norm), 4) for v in chroma_mean]
@@ -646,12 +759,7 @@ def clamp(val: float, lo: float = 0.0, hi: float = 100.0) -> int:
 
 
 def score_rhythm(f: RawFeatures) -> int:
-    """
-    Хэмнэлийн тогтвортой байдал — rhythm_stability + onset_regularity хосолсон.
-    Acoustic guitar-д хэмнэл хамгийн чухал.
-    """
     base = (f.rhythm_stability * 0.6 + f.onset_regularity * 0.4) * 100
-    # Хэт удаан эсвэл хэт хурдан tempo → хасна
     tempo_penalty = 0.0
     if f.tempo_bpm < 40 or f.tempo_bpm > 220:
         tempo_penalty = 15.0
@@ -659,11 +767,6 @@ def score_rhythm(f: RawFeatures) -> int:
 
 
 def score_dynamics(f: RawFeatures) -> int:
-    """
-    Динамик хяналт — dynamic_range өргөн = сайн,
-    silence_ratio хэт их = тоглолт тасарсан.
-    """
-    # 20–45 dB хүрээ = дундаж-сайн; <10 = монотон; >55 = хэт их хэлбэлзэл
     dr = f.dynamic_range_db
     if dr < 5:
         range_score = 20.0
@@ -673,28 +776,18 @@ def score_dynamics(f: RawFeatures) -> int:
         range_score = 70.0 + (dr - 15) * 0.8
     else:
         range_score = 90.0
-
-    # Тасралт их байвал хасна
     silence_penalty = min(f.silence_ratio * 80, 30.0)
     return clamp(range_score - silence_penalty)
 
 
 def score_clarity(f: RawFeatures) -> int:
-    """
-    Аккордын тодрол — chroma_entropy + active_note_count.
-    Гитарын аккорд ихэвчлэн 3–6 нот → active_note_count 3-6 = сайн.
-    Энтропи өндөр = нотууд тэгш тархсан = тод аккорд.
-    """
-    # Идэвхтэй нотын тоо 3–6 = 100 оноо руу ойртоно
     if f.active_note_count < 2:
         note_score = 20.0
     elif f.active_note_count <= 6:
         note_score = 50.0 + f.active_note_count * 8.0
     else:
-        # Хэт олон нот = будлиантай дуу
         note_score = max(30.0, 98.0 - (f.active_note_count - 6) * 10)
 
-    # Chroma entropy 2.5–3.2 bit = сайн (12 нотын дотор тэнцвэртэй)
     ent = f.chroma_entropy
     if ent < 1.5:
         ent_score = 30.0
@@ -709,13 +802,7 @@ def score_clarity(f: RawFeatures) -> int:
 
 
 def score_consistency(f: RawFeatures) -> int:
-    """
-    Onset тогтмол байдал — цохилтын хурд, тогтвортой байдал.
-    Acoustic guitar-д onset_rate 2–6/sec ердийн.
-    """
     reg_score = f.onset_regularity * 100
-
-    # onset rate оновчтой хүрээ 2–6/sec
     rate = f.onset_rate
     if rate < 1.0:
         rate_bonus = -20.0
@@ -725,12 +812,10 @@ def score_consistency(f: RawFeatures) -> int:
         rate_bonus = 0.0
     else:
         rate_bonus = -15.0
-
     return clamp(reg_score + rate_bonus)
 
 
 def _chord_to_chroma(notes: list[str]) -> np.ndarray:
-    """Нотын нэрсийн жагсаалтыг 12-хэмжээст chroma vector болгоно."""
     NOTE_IDX = {"C":0,"C#":1,"D":2,"D#":3,"E":4,"F":5,
                 "F#":6,"G":7,"G#":8,"A":9,"A#":10,"B":11}
     vec = np.zeros(12)
@@ -743,60 +828,29 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 
-# ── Дууны chord профайл ───────────────────────────────────────────────────────
-#
-# RIPTIDE — Vance Joy
-#   Бүтэц: Am  G  C  (бараг бүх хэсэг)  +  Bridge: Fmaj7
-#   Am  = A C E
-#   G   = G B D
-#   C   = C E G
-#   Fmaj7 = F A C E   (bridge дээр л)
-#
-#   Нийт нотын давтамжийн жин (chord chart-аас):
-#     Am: 40% үүссэн  → A,C,E   × 0.40
-#     G:  35%         → G,B,D   × 0.35
-#     C:  20%         → C,E,G   × 0.20
-#     Fmaj7: 5%       → F,A,C,E × 0.05
-#
 RIPTIDE_PROFILE = (
-    _chord_to_chroma(["A","C","E"]) * 0.40 +   # Am
-    _chord_to_chroma(["G","B","D"]) * 0.35 +   # G
-    _chord_to_chroma(["C","E","G"]) * 0.20 +   # C
-    _chord_to_chroma(["F","A","C","E"]) * 0.05  # Fmaj7
+    _chord_to_chroma(["A","C","E"]) * 0.40 +
+    _chord_to_chroma(["G","B","D"]) * 0.35 +
+    _chord_to_chroma(["C","E","G"]) * 0.20 +
+    _chord_to_chroma(["F","A","C","E"]) * 0.05
 )
 RIPTIDE_PROFILE /= RIPTIDE_PROFILE.sum() + 1e-9
 
-# AS LONG AS YOU LOVE ME — Justin Bieber
-#   Capo 2 дээр: Am G C F  (relative: Bm A D G)
-#   Bm = B D F#
-#   A  = A C# E
-#   D  = D F# A
-#   G  = G B D
-#
 ALAYLM_PROFILE = (
-    _chord_to_chroma(["B","D","F#"]) * 0.30 +  # Bm
-    _chord_to_chroma(["A","C#","E"]) * 0.25 +  # A
-    _chord_to_chroma(["D","F#","A"]) * 0.30 +  # D
-    _chord_to_chroma(["G","B","D"])  * 0.15     # G
+    _chord_to_chroma(["B","D","F#"]) * 0.30 +
+    _chord_to_chroma(["A","C#","E"]) * 0.25 +
+    _chord_to_chroma(["D","F#","A"]) * 0.30 +
+    _chord_to_chroma(["G","B","D"])  * 0.15
 )
 ALAYLM_PROFILE /= ALAYLM_PROFILE.sum() + 1e-9
 
-# Хүлээгдэж буй tempo (BPM) — librosa half/double tempo алдаа нөхөхийн тулд
-# octave tolerance-тэй шалгана
 RIPTIDE_BPM  = 93.0
-ALAYLM_BPM   = 100.0   # Bieber cover ихэвчлэн 96–104 BPM
+ALAYLM_BPM   = 100.0
 
 
 def _bpm_score(detected: float, target: float, tol: float = 12.0) -> float:
-    """
-    Detected BPM-г target-тэй харьцуулна.
-    librosa заримдаа tempo-г 2 дахин бага/их тоолдог тул
-    half (target/2) болон double (target*2) хувилбарыг ч шалгана.
-    0.0–1.0 буцаана.
-    """
     for mult in (1.0, 0.5, 2.0):
         if abs(detected - target * mult) <= tol:
-            # Ойр байх тусам өндөр оноо
             return 1.0 - abs(detected - target * mult) / tol
     return 0.0
 
@@ -806,21 +860,14 @@ def detect_song(f: RawFeatures) -> str:
         return "Тодорхойгүй"
 
     cv = np.array(f.chroma_vector)
-
-    # Chroma similarity
     riptide_chroma  = _cosine(cv, RIPTIDE_PROFILE)
     alaylm_chroma   = _cosine(cv, ALAYLM_PROFILE)
-
-    # BPM оноо
     riptide_bpm  = _bpm_score(f.tempo_bpm, RIPTIDE_BPM)
     alaylm_bpm   = _bpm_score(f.tempo_bpm, ALAYLM_BPM)
-
-    # Нийт оноо: chroma 70% + bpm 30%
     riptide_total = riptide_chroma * 0.70 + riptide_bpm * 0.30
     alaylm_total  = alaylm_chroma  * 0.70 + alaylm_bpm  * 0.30
 
-    THRESHOLD = 0.45   # энэ доороос "Тодорхойгүй"
-
+    THRESHOLD = 0.45
     best_score = max(riptide_total, alaylm_total)
     if best_score < THRESHOLD:
         return "Тодорхойгүй"
@@ -840,13 +887,12 @@ def level_from_score(score: int) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. FEEDBACK GENERATOR  (дүрмэд суурилсан текст)
+# 3. FEEDBACK GENERATOR
 # ─────────────────────────────────────────────────────────────────────────────
 def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) -> dict:
     level = level_from_score(total)
     song  = detect_song(f)
 
-    # ── Темп тайлбар ─────────────────────────────────────────────────────────
     bpm = f.tempo_bpm
     if bpm < 60:
         tempo_feel = f"Удаан ({bpm:.0f} BPM) — suranзалтай темп"
@@ -859,7 +905,6 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
     else:
         tempo_feel = f"Маш хурдан ({bpm:.0f} BPM)"
 
-    # ── Хэмнэлийн үнэлгээ текст ──────────────────────────────────────────────
     if r >= 80:
         rhythm_accuracy = "Маш сайн — хэмнэл тогтвортой, найдвартай"
     elif r >= 60:
@@ -869,7 +914,6 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
     else:
         rhythm_accuracy = "Хангалтгүй — хэмнэл ихээхэн хэлбэлзэлтэй"
 
-    # ── Аккордын тодрол ───────────────────────────────────────────────────────
     if cl >= 75:
         chord_clarity = "Маш тод — аккорд цэвэр дарагдаж байна"
     elif cl >= 55:
@@ -879,7 +923,6 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
     else:
         chord_clarity = "Тодорхойгүй — аккорд нарийвчлал хэрэгтэй"
 
-    # ── Динамик хүрээ ─────────────────────────────────────────────────────────
     if d >= 75:
         dynamic_range = f"Өргөн ({f.dynamic_range_db:.0f} dB) — сайн динамик хяналт"
     elif d >= 50:
@@ -887,7 +930,6 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
     else:
         dynamic_range = f"Нарийн ({f.dynamic_range_db:.0f} dB) — динамик хяналт хэрэгтэй"
 
-    # ── Давуу талууд ─────────────────────────────────────────────────────────
     strengths = []
     if r >= 65:
         strengths.append("Хэмнэл тогтвортой, beat алдагдахгүй тоглож байна")
@@ -902,7 +944,6 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
     if not strengths:
         strengths.append("Тоглох хүсэл эрмэлзэл харагдаж байна — дадлага үргэлжлүүлнэ үү")
 
-    # ── Сайжруулах хэсгүүд ───────────────────────────────────────────────────
     areas = []
     if r < 60:
         areas.append("Хэмнэлийн тогтвортой байдал — метроном ашиглан дадлага хий")
@@ -917,9 +958,7 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
     if not areas:
         areas.append("Илүү нарийн техник (vibrato, fingerpicking) сурах")
 
-    # ── Дадлагын зөвлөмж ─────────────────────────────────────────────────────
     tips = []
-
     if r < 65:
         tips.append(
             "Метроном 70 BPM-с эхлээд дуртай дуугаа тоглох дадлага хий. "
@@ -950,7 +989,6 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
             "Fingerpicking техник нэмж, ганц нотоор melody тоглох дадлагыг туршиж үз."
         )
 
-    # ── Ерөнхий үнэлгээ ──────────────────────────────────────────────────────
     level_desc = {
         "Beginner":      "Эхлэгч түвшний тоглогч.",
         "Intermediate":  "Дундаж түвшний тоглогч.",
@@ -999,22 +1037,17 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
 # 4. ANALYZE PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
 def analyze_pipeline(audio_bytes: bytes) -> SkillAnalysis:
-    # a) Feature задлах
     f = extract_features(audio_bytes)
 
-    # b) Дэд оноонууд
     r  = score_rhythm(f)
     d  = score_dynamics(f)
     cl = score_clarity(f)
     co = score_consistency(f)
 
-    # c) Нийт оноо — хэмнэл хамгийн чухал (40%), дараа нь clarity (25%)
     total = clamp(r * 0.40 + d * 0.15 + cl * 0.25 + co * 0.20)
 
-    # d) Текст санал
     feedback = make_feedback(f, r, d, cl, co, total)
 
-    # e) Дэд оноонуудыг response-д нэмэх
     feedback["rhythm_score"]      = r
     feedback["dynamics_score"]    = d
     feedback["clarity_score"]     = cl
@@ -1023,66 +1056,16 @@ def analyze_pipeline(audio_bytes: bytes) -> SkillAnalysis:
     return SkillAnalysis(**feedback)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. ENDPOINT
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def debug_song(
-    audio: UploadFile = File(...),
-):
-    """
-    Chroma vector болон Riptide/ALAYLM similarity оноог задлан харуулна.
-    Алгоритм тохируулахад ашиглана.
-    """
-    audio_bytes = await audio.read()
-    try:
-        f = extract_features(audio_bytes)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-    NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-    cv = np.array(f.chroma_vector) if f.chroma_vector else np.zeros(12)
-
-    riptide_chroma = _cosine(cv, RIPTIDE_PROFILE)
-    alaylm_chroma  = _cosine(cv, ALAYLM_PROFILE)
-    riptide_bpm    = _bpm_score(f.tempo_bpm, RIPTIDE_BPM)
-    alaylm_bpm     = _bpm_score(f.tempo_bpm, ALAYLM_BPM)
-    riptide_total  = riptide_chroma * 0.70 + riptide_bpm * 0.30
-    alaylm_total   = alaylm_chroma  * 0.70 + alaylm_bpm  * 0.30
-
-    return {
-        "tempo_bpm": f.tempo_bpm,
-        "dominant_note": f.dominant_note,
-        "active_note_count": f.active_note_count,
-        "chroma_vector": {NOTE_NAMES[i]: f.chroma_vector[i] for i in range(12)},
-        "riptide_profile": {NOTE_NAMES[i]: round(float(RIPTIDE_PROFILE[i]), 4) for i in range(12)},
-        "alaylm_profile":  {NOTE_NAMES[i]: round(float(ALAYLM_PROFILE[i]), 4) for i in range(12)},
-        "scores": {
-            "riptide": {
-                "chroma_similarity": round(riptide_chroma, 4),
-                "bpm_score":         round(riptide_bpm, 4),
-                "total":             round(riptide_total, 4),
-            },
-            "alaylm": {
-                "chroma_similarity": round(alaylm_chroma, 4),
-                "bpm_score":         round(alaylm_bpm, 4),
-                "total":             round(alaylm_total, 4),
-            },
-        },
-        "detected": detect_song(f),
-        "threshold": 0.45,
-    }
-
-
 @app.get("/")
 async def root():
     return {
         "name": "Guitar Skill Analyzer — Local",
-        "version": "3.1.0",
+        "version": "4.0.0",
         "description": "Гадаад API-гүй — librosa + chord-profile cosine similarity",
         "endpoints": {
-            "POST /analyze": "Бүрэн шинжилгээ + ур чадварын үнэлгээ",
-            "POST /debug":   "Chroma vector + similarity оноо харах (тохиргоонд)",
+            "POST /analyze":       "Бүрэн шинжилгээ + ур чадварын үнэлгээ",
+            "POST /chords/detect": "Chord таних",
+            "POST /debug":         "Chroma vector + similarity оноо харах",
         },
         "formats": ["wav", "mp3", "m4a", "flac", "ogg", "webm"],
         "max_mb": MAX_FILE_MB,
