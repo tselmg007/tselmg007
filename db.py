@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -11,13 +11,10 @@ import sys
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL")
 
 if DATABASE_URL:
-    # mysql:// → mysql+pymysql:// болгоно
     if DATABASE_URL.startswith("mysql://"):
         DATABASE_URL = DATABASE_URL.replace("mysql://", "mysql+pymysql://", 1)
     print(f"[DB] Connecting → {DATABASE_URL.split('@')[-1]}", flush=True)
-
 else:
-    # DATABASE_URL байхгүй бол хувь хувийн variables-аас үүсгэнэ
     DB_HOST = os.getenv("DB_HOST") or os.getenv("MYSQLHOST")
     DB_PORT = os.getenv("DB_PORT") or os.getenv("MYSQLPORT", "3306")
     DB_NAME = os.getenv("DB_NAME") or os.getenv("MYSQLDATABASE")
@@ -25,10 +22,8 @@ else:
     DB_PASS = os.getenv("DB_PASS") or os.getenv("MYSQLPASSWORD")
 
     missing = [k for k, v in {
-        "DB_HOST": DB_HOST,
-        "DB_NAME": DB_NAME,
-        "DB_USER": DB_USER,
-        "DB_PASS": DB_PASS,
+        "DB_HOST": DB_HOST, "DB_NAME": DB_NAME,
+        "DB_USER": DB_USER, "DB_PASS": DB_PASS,
     }.items() if not v]
 
     if missing:
@@ -51,31 +46,67 @@ Base = declarative_base()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# User Model (MySQL Table)
+# User Model
 # ─────────────────────────────────────────────────────────────────────────────
 class User(Base):
     __tablename__ = "users"
 
-    id         = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    username   = Column(String(50),  unique=True, nullable=False, index=True)
-    email      = Column(String(255), unique=True, nullable=False, index=True)
-    full_name  = Column(String(100), nullable=True)
-    first_name = Column(String(100), nullable=True)
-    last_name  = Column(String(100), nullable=True)
-    phone      = Column(String(20),  nullable=True)
-    birth_date = Column(String(20),  nullable=True)
+    id              = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    username        = Column(String(50),  unique=True, nullable=False, index=True)
+    email           = Column(String(255), unique=True, nullable=False, index=True)
+    full_name       = Column(String(100), nullable=True)
+    first_name      = Column(String(100), nullable=True)
+    last_name       = Column(String(100), nullable=True)
+    phone           = Column(String(20),  nullable=True)
+    birth_date      = Column(String(20),  nullable=True)
     hashed_password = Column(String(255), nullable=False)
-    level      = Column(Integer, default=1, nullable=False)
-    is_active  = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    level           = Column(Integer, default=1, nullable=False)
+    is_active       = Column(Boolean, default=True)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):
         return f"<User id={self.id} username={self.username}>"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DB Session Dependency (FastAPI-д inject хийхэд ашиглана)
+# PracticeSession — тоглосон тоо, дадлагын цаг хадгалах
+# ─────────────────────────────────────────────────────────────────────────────
+class PracticeSession(Base):
+    __tablename__ = "practice_sessions"
+
+    id               = Column(Integer, primary_key=True, autoincrement=True)
+    user_id          = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at       = Column(DateTime, default=datetime.utcnow)
+    duration_seconds = Column(Integer, default=0)      # дадлагын үргэлжлэх хугацаа (секунд)
+    score            = Column(Integer, nullable=True)  # analyze-ийн оноо
+    level            = Column(String(20), nullable=True)  # тухайн үеийн түвшин
+    session_type     = Column(String(20), default="analyze")  # "analyze" | "chord"
+
+    def __repr__(self):
+        return f"<PracticeSession id={self.id} user_id={self.user_id} score={self.score}>"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LevelHistory — түвшний өөрчлөлтийн түүх
+# ─────────────────────────────────────────────────────────────────────────────
+class LevelHistory(Base):
+    __tablename__ = "level_history"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    user_id    = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    changed_at = Column(DateTime, default=datetime.utcnow)
+    from_level = Column(Integer, nullable=False)    # өмнөх түвшин (1-4)
+    to_level   = Column(Integer, nullable=False)    # шинэ түвшин (1-4)
+    from_label = Column(String(20), nullable=False) # "Beginner"
+    to_label   = Column(String(20), nullable=False) # "Intermediate"
+
+    def __repr__(self):
+        return f"<LevelHistory id={self.id} {self.from_label}→{self.to_label}>"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DB Session Dependency
 # ─────────────────────────────────────────────────────────────────────────────
 def get_db():
     db = SessionLocal()

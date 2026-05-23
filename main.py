@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 import librosa
 import numpy as np
@@ -22,7 +23,7 @@ from pydantic import BaseModel
 
 import requests as http_requests
 
-from db import get_db, create_tables, User
+from db import get_db, create_tables, User, PracticeSession, LevelHistory
 from auth import (
     hash_password, verify_password,
     create_access_token, decode_access_token,
@@ -32,7 +33,6 @@ from auth import (
     GoogleLoginRequest,
     ACCESS_TOKEN_EXPIRE_MINUTES,
 )
-from datetime import timedelta
 
 warnings.filterwarnings("ignore")
 
@@ -69,8 +69,8 @@ SUPPORTED_CT = {
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
 
-# 12 нотын нэрс — бүх газар нэг л хувилбар ашиглана
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+LEVEL_LABEL = {1: "Beginner", 2: "Intermediate", 3: "Advanced", 4: "Professional"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,6 +208,113 @@ def update_me(req: UpdateProfileRequest,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PROFILE STATS ROUTES — тоглосон тоо, дадлагын цаг, түвшний түүх
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/users/me/stats", summary="Хэрэглэгчийн нийт статистик", tags=["Profile"])
+def get_my_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Профайл хуудсанд харуулах нийт статистик:
+    - Нийт тоглосон тоо
+    - Нийт дадлагын цаг (минутаар)
+    - Апп ашигласан хугацаа (бүртгүүлснээс хойш өдрөөр)
+    - Дундаж оноо
+    - Одоогийн түвшин
+    """
+    sessions = db.query(PracticeSession).filter(
+        PracticeSession.user_id == current_user.id
+    ).all()
+
+    total_sessions = len(sessions)
+    total_seconds  = sum(s.duration_seconds or 0 for s in sessions)
+    total_minutes  = round(total_seconds / 60, 1)
+
+    scores = [s.score for s in sessions if s.score is not None]
+    avg_score = round(sum(scores) / len(scores), 1) if scores else 0
+
+    # Апп ашигласан хугацаа — бүртгүүлснээс хойш өдрөөр
+    days_since_register = (datetime.utcnow() - current_user.created_at).days if current_user.created_at else 0
+
+    # Энэ долоо хоногт тоглосон тоо
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    weekly_sessions = sum(1 for s in sessions if s.created_at and s.created_at >= week_ago)
+
+    return {
+        "total_sessions":       total_sessions,
+        "total_minutes":        total_minutes,
+        "avg_score":            avg_score,
+        "current_level":        current_user.level,
+        "current_level_label":  LEVEL_LABEL.get(current_user.level, "Beginner"),
+        "days_using_app":       days_since_register,
+        "weekly_sessions":      weekly_sessions,
+        "member_since":         current_user.created_at.isoformat() if current_user.created_at else None,
+    }
+
+
+@app.get("/users/me/history", summary="Дадлагын түүх (сүүлийн 20)", tags=["Profile"])
+def get_my_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Сүүлийн 20 дадлагын бичлэг — огноо, оноо, үргэлжлэх хугацаа
+    """
+    sessions = (
+        db.query(PracticeSession)
+        .filter(PracticeSession.user_id == current_user.id)
+        .order_by(PracticeSession.created_at.desc())
+        .limit(20)
+        .all()
+    )
+    return {
+        "history": [
+            {
+                "id":               s.id,
+                "date":             s.created_at.isoformat() if s.created_at else None,
+                "score":            s.score,
+                "level":            s.level,
+                "duration_seconds": s.duration_seconds,
+                "session_type":     s.session_type,
+            }
+            for s in sessions
+        ]
+    }
+
+
+@app.get("/users/me/level-history", summary="Түвшний өөрчлөлтийн түүх", tags=["Profile"])
+def get_level_history(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Beginner → Intermediate → Advanced гэх мэт түвшний өөрчлөлтийн бүх түүх
+    """
+    history = (
+        db.query(LevelHistory)
+        .filter(LevelHistory.user_id == current_user.id)
+        .order_by(LevelHistory.changed_at.asc())
+        .all()
+    )
+    return {
+        "current_level":       current_user.level,
+        "current_level_label": LEVEL_LABEL.get(current_user.level, "Beginner"),
+        "level_history": [
+            {
+                "date":       h.changed_at.isoformat() if h.changed_at else None,
+                "from_level": h.from_level,
+                "to_level":   h.to_level,
+                "from_label": h.from_label,
+                "to_label":   h.to_label,
+            }
+            for h in history
+        ]
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SONGS / ASSESSMENT ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -215,7 +322,6 @@ SONGS = [
     {"id": 1, "title": "Riptide", "artist": "Vance Joy", "bpm": 93, "difficulty": "Beginner"},
     {"id": 2, "title": "As Long As You Love Me", "artist": "Justin Bieber", "bpm": 100, "difficulty": "Intermediate"},
 ]
-LEVEL_LABEL = {1: "Beginner", 2: "Intermediate", 3: "Advanced", 4: "Professional"}
 
 
 @app.get("/songs/assessment", summary="Хэрэглэгчийн түвшин болон дуунуудын жагсаалт",
@@ -253,8 +359,7 @@ async def analyze_guitar(
     ct = (audio.content_type or "").lower().split(";")[0].strip()
     print(f"[ANALYZE] content_type={ct!r} filename={audio.filename!r}")
     if ct not in SUPPORTED_CT:
-        raise HTTPException(status_code=415,
-                            detail=f"Дэмжигдэхгүй төрөл: '{ct}'.")
+        raise HTTPException(status_code=415, detail=f"Дэмжигдэхгүй төрөл: '{ct}'.")
     audio_bytes = await audio.read()
     size_mb = len(audio_bytes) / (1024 * 1024)
     print(f"[ANALYZE] size={len(audio_bytes)} bytes ({size_mb:.2f} MB)")
@@ -268,40 +373,60 @@ async def analyze_guitar(
     except Exception as exc:
         print(f"[ANALYZE] ERROR: {exc}")
         raise HTTPException(status_code=500, detail=f"Шинжилгээний алдаа: {exc}")
+
     if token:
         payload = decode_access_token(token)
         if payload:
             user_id = payload.get("sub")
             if user_id:
-                new_level = LEVEL_MAP.get(result.skill_level, 1)
-                db.query(User).filter(User.id == int(user_id)).update({"level": new_level})
-                db.commit()
+                user = db.query(User).filter(User.id == int(user_id)).first()
+                if user:
+                    new_level = LEVEL_MAP.get(result.skill_level, 1)
+
+                    # ── Түвшин өөрчлөгдсөн бол LevelHistory-д бүртгэнэ ──────
+                    if user.level != new_level:
+                        history = LevelHistory(
+                            user_id    = user.id,
+                            from_level = user.level,
+                            to_level   = new_level,
+                            from_label = LEVEL_LABEL.get(user.level, "Beginner"),
+                            to_label   = LEVEL_LABEL.get(new_level, "Beginner"),
+                        )
+                        db.add(history)
+
+                    # ── Дадлагын session хадгална ─────────────────────────────
+                    session = PracticeSession(
+                        user_id          = user.id,
+                        duration_seconds = int(result.duration_seconds),
+                        score            = result.skill_score,
+                        level            = result.skill_level,
+                        session_type     = "analyze",
+                    )
+                    db.add(session)
+
+                    # ── Хэрэглэгчийн түвшинг шинэчилнэ ──────────────────────
+                    user.level = new_level
+                    db.commit()
+
     return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CHORD DETECTION ROUTE  (сайжруулсан хувилбар)
+# CHORD DETECTION ROUTE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_chord_profiles() -> dict:
-    """
-    Root note-д хамгийн өндөр жин өгсөн weighted chord профайл.
-    - Мажор/минор: root=2.0 → 7th chord-уудаас тодорхой ялгарна
-    - 7th chord-ууд: 7th нот=1.5 → мажор/минор-оос ялгарна
-    - Root note энерги нэмэлт boost авна (detect_chord дотор)
-    9 төрөл × 12 нот = 108 chord таних боломжтой
-    """
     profiles = {}
     interval_map = {
-        "":     [(0, 2.0), (4, 0.8), (7, 1.2)],              # Мажор
-        "m":    [(0, 2.0), (3, 0.8), (7, 1.2)],              # Минор
-        "7":    [(0, 1.5), (4, 0.8), (7, 1.0), (10, 1.5)],   # Dominant 7
-        "maj7": [(0, 1.5), (4, 0.8), (7, 1.0), (11, 1.5)],   # Major 7
-        "min7": [(0, 1.5), (3, 0.8), (7, 1.0), (10, 1.5)],   # Minor 7
-        "sus2": [(0, 2.0), (2, 1.0), (7, 1.2)],              # Sus2
-        "sus4": [(0, 2.0), (5, 1.0), (7, 1.2)],              # Sus4
-        "dim":  [(0, 2.0), (3, 0.8), (6, 1.0)],              # Diminished
-        "aug":  [(0, 2.0), (4, 0.8), (8, 1.0)],              # Augmented
+        "":     [(0, 2.0), (4, 0.8), (7, 1.2)],
+        "m":    [(0, 2.0), (3, 0.8), (7, 1.2)],
+        "7":    [(0, 1.5), (4, 0.8), (7, 1.0), (10, 1.5)],
+        "maj7": [(0, 1.5), (4, 0.8), (7, 1.0), (11, 1.5)],
+        "min7": [(0, 1.5), (3, 0.8), (7, 1.0), (10, 1.5)],
+        "sus2": [(0, 2.0), (2, 1.0), (7, 1.2)],
+        "sus4": [(0, 2.0), (5, 1.0), (7, 1.2)],
+        "dim":  [(0, 2.0), (3, 0.8), (6, 1.0)],
+        "aug":  [(0, 2.0), (4, 0.8), (8, 1.0)],
     }
     for suffix, weighted_intervals in interval_map.items():
         for i, root in enumerate(NOTE_NAMES):
@@ -321,41 +446,30 @@ async def detect_chord(
 ):
     ct = (audio.content_type or "").lower().split(";")[0].strip()
     print(f"[CHORD] content_type={ct!r} filename={audio.filename!r}")
-
     audio_bytes = await audio.read()
     if len(audio_bytes) < 1000:
         raise HTTPException(status_code=400, detail="Файл хэт жижиг.")
-
     try:
         f = extract_features(audio_bytes)
         chroma = np.array(f.chroma_vector)
-
         best_chord = "Unknown"
         best_score = -1.0
-
         for chord_name, profile in CHORD_PROFILES.items():
             score = _cosine(chroma, profile)
-
-            # Root note boost: chord-ийн root нот chroma-д чанга байвал оноо нэмэх
-            # Sharp нотыг эхлээд шалгана (C# нь C-ийн өмнө орох ёстой)
             root_name = None
             for n in ["C#", "D#", "F#", "G#", "A#", "C", "D", "E", "F", "G", "A", "B"]:
                 if chord_name.startswith(n):
                     root_name = n
                     break
-
             if root_name and root_name in NOTE_NAMES:
                 root_idx = NOTE_NAMES.index(root_name)
                 root_energy = float(chroma[root_idx])
                 score = score * (1.0 + root_energy * 0.5)
-
             if score > best_score:
                 best_score = score
                 best_chord = chord_name
-
         confidence = round(float(best_score) * 100, 1)
         print(f"[CHORD] detected={best_chord} confidence={confidence}%")
-
         return {
             "chord": best_chord,
             "chord_name": best_chord,
@@ -363,7 +477,6 @@ async def detect_chord(
             "dominant_note": f.dominant_note,
             "tempo_bpm": f.tempo_bpm,
         }
-
     except Exception as exc:
         print(f"[CHORD] ERROR: {exc}")
         raise HTTPException(status_code=500, detail=f"Chord detection алдаа: {exc}")
@@ -745,8 +858,13 @@ def analyze_pipeline(audio_bytes: bytes) -> SkillAnalysis:
 @app.get("/")
 async def root():
     return {"name": "Guitar Skill Analyzer", "version": "4.0.0",
-            "endpoints": {"POST /analyze": "Бүрэн шинжилгээ",
-                          "POST /chords/detect": "Chord таних (108 chord)"},
+            "endpoints": {
+                "POST /analyze":             "Бүрэн шинжилгээ",
+                "POST /chords/detect":       "Chord таних (108 chord)",
+                "GET  /users/me/stats":      "Профайл статистик",
+                "GET  /users/me/history":    "Дадлагын түүх",
+                "GET  /users/me/level-history": "Түвшний өөрчлөлтийн түүх",
+            },
             "formats": ["wav", "mp3", "m4a", "flac", "ogg", "webm"],
             "max_mb": MAX_FILE_MB, "docs": "/docs"}
 
