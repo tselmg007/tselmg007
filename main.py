@@ -1,14 +1,8 @@
 """
-Guitar Skill Level Analyzer — Pure Local Backend v3
+Guitar Skill Level Analyzer — Pure Local Backend v4
 ====================================================
 Бүх шинжилгээ librosa + numpy + дүрмэд суурилсан алгоритмаар
 серверийн дотоодод гүйцэтгэгдэнэ.
-
-Суулгах:
-    pip install -r requirements.txt
-
-Ажиллуулах:
-    uvicorn main:app --reload --port 8000
 """
 import io
 import os
@@ -16,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import warnings
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 import librosa
 import numpy as np
@@ -46,8 +40,8 @@ warnings.filterwarnings("ignore")
 # App
 # ─────────────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Guitar Skill Analyzer — Local",
-    description="Гадаад API-гүй, бүх шинжилгээ librosa + алгоритмаар. User auth багтсан.",
+    title="Guitar Skill Analyzer",
+    description="Бүх шинжилгээ librosa + алгоритмаар. User auth багтсан.",
     version="4.0.0",
 )
 app.add_middleware(
@@ -59,11 +53,9 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# DB таблуудыг эхлүүлэхэд үүсгэнэ
 @app.on_event("startup")
 def startup():
     create_tables()
-    # ffmpeg шалгах
     ffmpeg = _get_ffmpeg()
     print(f"[STARTUP] ffmpeg path: {ffmpeg}")
 
@@ -77,14 +69,14 @@ SUPPORTED_CT = {
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
 
+# 12 нотын нэрс — бүх газар нэг л хувилбар ашиглана
+NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Auth Helper — одоогийн хэрэглэгчийг токеноос авна
+# Auth Helper
 # ─────────────────────────────────────────────────────────────────────────────
-def get_current_user(
-    request: Request,
-    db: Session = Depends(get_db),
-) -> User:
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Токен хүчингүй эсвэл дууссан.",
@@ -99,11 +91,9 @@ def get_current_user(
     payload = decode_access_token(token)
     if payload is None:
         raise credentials_exception
-
     user_id: int = payload.get("sub")
     if user_id is None:
         raise credentials_exception
-
     user = db.query(User).filter(User.id == int(user_id)).first()
     if user is None or not user.is_active:
         raise credentials_exception
@@ -114,195 +104,107 @@ def get_current_user(
 # AUTH ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.post(
-    "/auth/register",
-    response_model=TokenResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Шинэ хэрэглэгч бүртгэх",
-    tags=["Auth"],
-)
+@app.post("/auth/register", response_model=TokenResponse,
+          status_code=status.HTTP_201_CREATED,
+          summary="Шинэ хэрэглэгч бүртгэх", tags=["Auth"])
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == req.username).first():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"'{req.username}' username аль хэдийн бүртгэлтэй.",
-        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"'{req.username}' username аль хэдийн бүртгэлтэй.")
     if db.query(User).filter(User.email == req.email).first():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"'{req.email}' email аль хэдийн бүртгэлтэй.",
-        )
-
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"'{req.email}' email аль хэдийн бүртгэлтэй.")
     new_user = User(
-        username=req.username,
-        email=req.email,
-        first_name=req.firstName,
-        last_name=req.lastName,
-        phone=req.phone,
-        birth_date=req.birthDate,
+        username=req.username, email=req.email,
+        first_name=req.firstName, last_name=req.lastName,
+        phone=req.phone, birth_date=req.birthDate,
         hashed_password=hash_password(req.password),
     )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    token = create_access_token(
-        data={"sub": str(new_user.id)},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-    )
-    return TokenResponse(
-        token=token,
-        id=new_user.id,
-        username=new_user.username,
-        email=new_user.email,
-        firstName=new_user.first_name or "",
-        lastName=new_user.last_name or "",
-        phone=new_user.phone or "",
-        birthDate=new_user.birth_date or "",
-        level=new_user.level,
-    )
+    db.add(new_user); db.commit(); db.refresh(new_user)
+    token = create_access_token(data={"sub": str(new_user.id)},
+                                expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    return TokenResponse(token=token, id=new_user.id, username=new_user.username,
+                         email=new_user.email, firstName=new_user.first_name or "",
+                         lastName=new_user.last_name or "", phone=new_user.phone or "",
+                         birthDate=new_user.birth_date or "", level=new_user.level)
 
 
-@app.post(
-    "/auth/login",
-    response_model=TokenResponse,
-    summary="Нэвтрэх (JWT токен авах)",
-    tags=["Auth"],
-)
+@app.post("/auth/login", response_model=TokenResponse,
+          summary="Нэвтрэх (JWT токен авах)", tags=["Auth"])
 def login(req: LoginRequest, db: Session = Depends(get_db)):
-    user = (
-        db.query(User).filter(User.username == req.username_or_email).first()
-        or db.query(User).filter(User.email == req.username_or_email).first()
-    )
-
+    user = (db.query(User).filter(User.username == req.username_or_email).first()
+            or db.query(User).filter(User.email == req.username_or_email).first())
     if not user or not verify_password(req.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Нэвтрэх нэр эсвэл нууц үг буруу.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Нэвтрэх нэр эсвэл нууц үг буруу.",
+                            headers={"WWW-Authenticate": "Bearer"})
     if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Таны бүртгэл идэвхгүй байна.",
-        )
-
-    token = create_access_token(
-        data={"sub": str(user.id)},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-    )
-    return TokenResponse(
-        token=token,
-        id=user.id,
-        username=user.username,
-        email=user.email,
-        firstName=user.first_name or "",
-        lastName=user.last_name or "",
-        phone=user.phone or "",
-        birthDate=user.birth_date or "",
-        level=user.level,
-    )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Таны бүртгэл идэвхгүй байна.")
+    token = create_access_token(data={"sub": str(user.id)},
+                                expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    return TokenResponse(token=token, id=user.id, username=user.username,
+                         email=user.email, firstName=user.first_name or "",
+                         lastName=user.last_name or "", phone=user.phone or "",
+                         birthDate=user.birth_date or "", level=user.level)
 
 
-@app.get(
-    "/auth/me",
-    response_model=UserResponse,
-    summary="Одоогийн хэрэглэгчийн мэдээлэл",
-    tags=["Auth"],
-)
+@app.get("/auth/me", response_model=UserResponse,
+         summary="Одоогийн хэрэглэгчийн мэдээлэл", tags=["Auth"])
 def get_me(current_user: User = Depends(get_current_user)):
     return UserResponse.from_orm(current_user)
 
 
-@app.post(
-    "/auth/google",
-    response_model=TokenResponse,
-    summary="Google-ээр нэвтрэх",
-    tags=["Auth"],
-)
+@app.post("/auth/google", response_model=TokenResponse,
+          summary="Google-ээр нэвтрэх", tags=["Auth"])
 def google_login(req: GoogleLoginRequest, db: Session = Depends(get_db)):
-    resp = http_requests.get(
-        "https://oauth2.googleapis.com/tokeninfo",
-        params={"id_token": req.id_token},
-        timeout=10,
-    )
+    resp = http_requests.get("https://oauth2.googleapis.com/tokeninfo",
+                             params={"id_token": req.id_token}, timeout=10)
     if resp.status_code != 200:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Google токен хүчингүй.")
-
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Google токен хүчингүй.")
     info = resp.json()
     email = info.get("email")
     if not email:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Email авч чадсангүй.")
-
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Email авч чадсангүй.")
     user = db.query(User).filter(User.email == email).first()
     if not user:
-        first_name = info.get("given_name", "")
-        last_name  = info.get("family_name", "")
-        username   = email.split("@")[0]
+        username = email.split("@")[0]
         base, i = username, 1
         while db.query(User).filter(User.username == username).first():
             username = f"{base}{i}"; i += 1
-        user = User(
-            username=username,
-            email=email,
-            first_name=first_name,
-            last_name=last_name,
-            hashed_password=hash_password(info.get("sub", "")),
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-
+        user = User(username=username, email=email,
+                    first_name=info.get("given_name", ""),
+                    last_name=info.get("family_name", ""),
+                    hashed_password=hash_password(info.get("sub", "")))
+        db.add(user); db.commit(); db.refresh(user)
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Бүртгэл идэвхгүй.")
-
-    token = create_access_token(
-        data={"sub": str(user.id)},
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-    )
-    return TokenResponse(
-        token=token,
-        id=user.id,
-        username=user.username,
-        email=user.email,
-        firstName=user.first_name or "",
-        lastName=user.last_name or "",
-        phone=user.phone or "",
-        birthDate=user.birth_date or "",
-        level=user.level,
-    )
+    token = create_access_token(data={"sub": str(user.id)},
+                                expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    return TokenResponse(token=token, id=user.id, username=user.username,
+                         email=user.email, firstName=user.first_name or "",
+                         lastName=user.last_name or "", phone=user.phone or "",
+                         birthDate=user.birth_date or "", level=user.level)
 
 
-@app.patch(
-    "/users/me",
-    response_model=ProfileResponse,
-    summary="Профайл мэдээлэл шинэчлэх",
-    tags=["Auth"],
-)
-def update_me(
-    req: UpdateProfileRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if req.birthDate is not None:
-        current_user.birth_date = req.birthDate
-    if req.phone is not None:
-        current_user.phone = req.phone
-    if req.firstName is not None:
-        current_user.first_name = req.firstName
-    if req.lastName is not None:
-        current_user.last_name = req.lastName
-    db.commit()
-    db.refresh(current_user)
-    return ProfileResponse(
-        id=current_user.id,
-        email=current_user.email,
-        firstName=current_user.first_name or "",
-        lastName=current_user.last_name or "",
-        phone=current_user.phone or "",
-        birthDate=current_user.birth_date or "",
-        level=current_user.level,
-    )
+@app.patch("/users/me", response_model=ProfileResponse,
+           summary="Профайл мэдээлэл шинэчлэх", tags=["Auth"])
+def update_me(req: UpdateProfileRequest,
+              current_user: User = Depends(get_current_user),
+              db: Session = Depends(get_db)):
+    if req.birthDate is not None: current_user.birth_date = req.birthDate
+    if req.phone is not None: current_user.phone = req.phone
+    if req.firstName is not None: current_user.first_name = req.firstName
+    if req.lastName is not None: current_user.last_name = req.lastName
+    db.commit(); db.refresh(current_user)
+    return ProfileResponse(id=current_user.id, email=current_user.email,
+                           firstName=current_user.first_name or "",
+                           lastName=current_user.last_name or "",
+                           phone=current_user.phone or "",
+                           birthDate=current_user.birth_date or "",
+                           level=current_user.level)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -310,22 +212,15 @@ def update_me(
 # ─────────────────────────────────────────────────────────────────────────────
 
 SONGS = [
-    {"id": 1, "title": "Riptide", "artist": "Vance Joy",        "bpm": 93,  "difficulty": "Beginner"},
+    {"id": 1, "title": "Riptide", "artist": "Vance Joy", "bpm": 93, "difficulty": "Beginner"},
     {"id": 2, "title": "As Long As You Love Me", "artist": "Justin Bieber", "bpm": 100, "difficulty": "Intermediate"},
 ]
-
 LEVEL_LABEL = {1: "Beginner", 2: "Intermediate", 3: "Advanced", 4: "Professional"}
 
 
-@app.get(
-    "/songs/assessment",
-    summary="Хэрэглэгчийн одоогийн түвшин болон шинжлэх дуунуудын жагсаалт",
-    tags=["Songs"],
-)
-def get_assessment(
-    request: Request,
-    db: Session = Depends(get_db),
-):
+@app.get("/songs/assessment", summary="Хэрэглэгчийн түвшин болон дуунуудын жагсаалт",
+         tags=["Songs"])
+def get_assessment(request: Request, db: Session = Depends(get_db)):
     user_level = None
     auth = request.headers.get("Authorization") or request.headers.get("authorization")
     token = auth.removeprefix("Bearer ").removeprefix("bearer ").strip() if auth else None
@@ -337,31 +232,17 @@ def get_assessment(
                 user = db.query(User).filter(User.id == int(user_id)).first()
                 if user:
                     user_level = {"level": user.level, "label": LEVEL_LABEL.get(user.level, "Beginner")}
-
-    return {
-        "user_level": user_level,
-        "songs": SONGS,
-    }
+    return {"user_level": user_level, "songs": SONGS}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GUITAR ANALYSIS ROUTES
+# GUITAR ANALYSIS ROUTE
 # ─────────────────────────────────────────────────────────────────────────────
 
-LEVEL_MAP = {
-    "Beginner":     1,
-    "Intermediate": 2,
-    "Advanced":     3,
-    "Professional": 4,
-}
+LEVEL_MAP = {"Beginner": 1, "Intermediate": 2, "Advanced": 3, "Professional": 4}
 
 
-@app.post(
-    "/analyze",
-    summary="Guitar audio шинжилгээ (100% дотоод)",
-    description="Librosa + алгоритмаар гитарын ур чадварыг тодорхойлж хэрэглэгчийн түвшинг хадгална.",
-    tags=["Analysis"],
-)
+@app.post("/analyze", summary="Guitar audio шинжилгээ", tags=["Analysis"])
 async def analyze_guitar(
     request: Request,
     audio: UploadFile = File(..., description="Guitar audio файл (wav/mp3/m4a/flac/ogg)"),
@@ -372,29 +253,21 @@ async def analyze_guitar(
     ct = (audio.content_type or "").lower().split(";")[0].strip()
     print(f"[ANALYZE] content_type={ct!r} filename={audio.filename!r}")
     if ct not in SUPPORTED_CT:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Дэмжигдэхгүй төрөл: '{ct}'. wav/mp3/m4a/flac/ogg/webm.",
-        )
-
+        raise HTTPException(status_code=415,
+                            detail=f"Дэмжигдэхгүй төрөл: '{ct}'.")
     audio_bytes = await audio.read()
     size_mb = len(audio_bytes) / (1024 * 1024)
     print(f"[ANALYZE] size={len(audio_bytes)} bytes ({size_mb:.2f} MB)")
-
     if size_mb > MAX_FILE_MB:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Файл хэт том: {size_mb:.1f} MB. Хамгийн их {MAX_FILE_MB} MB.",
-        )
+        raise HTTPException(status_code=413,
+                            detail=f"Файл хэт том: {size_mb:.1f} MB. Хамгийн их {MAX_FILE_MB} MB.")
     if len(audio_bytes) < 2000:
         raise HTTPException(status_code=400, detail="Файл хэт жижиг эсвэл хоосон.")
-
     try:
         result = analyze_pipeline(audio_bytes)
     except Exception as exc:
         print(f"[ANALYZE] ERROR: {exc}")
         raise HTTPException(status_code=500, detail=f"Шинжилгээний алдаа: {exc}")
-
     if token:
         payload = decode_access_token(token)
         if payload:
@@ -403,91 +276,46 @@ async def analyze_guitar(
                 new_level = LEVEL_MAP.get(result.skill_level, 1)
                 db.query(User).filter(User.id == int(user_id)).update({"level": new_level})
                 db.commit()
-
     return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CHORD DETECTION ROUTE
+# CHORD DETECTION ROUTE  (сайжруулсан хувилбар)
 # ─────────────────────────────────────────────────────────────────────────────
-
-NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 def _build_chord_profiles() -> dict:
     """
-    Root note-д хамгийн өндөр жин өгсөн chord профайл.
-    7th chord-уудыг мажор/минор-оос ялгахын тулд
-    7th нотын жинг бага, root-ын жинг өндөр болгосон.
+    Root note-д хамгийн өндөр жин өгсөн weighted chord профайл.
+    - Мажор/минор: root=2.0 → 7th chord-уудаас тодорхой ялгарна
+    - 7th chord-ууд: 7th нот=1.5 → мажор/минор-оос ялгарна
+    - Root note энерги нэмэлт boost авна (detect_chord дотор)
+    9 төрөл × 12 нот = 108 chord таних боломжтой
     """
     profiles = {}
-
-    NOTE_NAMES_LOCAL = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-
     interval_map = {
-        "":     [(0, 2.0), (4, 0.8), (7, 1.2)],              # Мажор: root давамгай
+        "":     [(0, 2.0), (4, 0.8), (7, 1.2)],              # Мажор
         "m":    [(0, 2.0), (3, 0.8), (7, 1.2)],              # Минор
-        "7":    [(0, 1.5), (4, 0.8), (7, 1.0), (10, 1.5)],   # Dom7: 7th нот чухал
-        "maj7": [(0, 1.5), (4, 0.8), (7, 1.0), (11, 1.5)],   # Maj7: maj7th нот чухал
-        "min7": [(0, 1.5), (3, 0.8), (7, 1.0), (10, 1.5)],   # Min7
+        "7":    [(0, 1.5), (4, 0.8), (7, 1.0), (10, 1.5)],   # Dominant 7
+        "maj7": [(0, 1.5), (4, 0.8), (7, 1.0), (11, 1.5)],   # Major 7
+        "min7": [(0, 1.5), (3, 0.8), (7, 1.0), (10, 1.5)],   # Minor 7
         "sus2": [(0, 2.0), (2, 1.0), (7, 1.2)],              # Sus2
         "sus4": [(0, 2.0), (5, 1.0), (7, 1.2)],              # Sus4
         "dim":  [(0, 2.0), (3, 0.8), (6, 1.0)],              # Diminished
         "aug":  [(0, 2.0), (4, 0.8), (8, 1.0)],              # Augmented
     }
-
     for suffix, weighted_intervals in interval_map.items():
-        for i, root in enumerate(NOTE_NAMES_LOCAL):
+        for i, root in enumerate(NOTE_NAMES):
             profile = np.zeros(12)
             for interval, weight in weighted_intervals:
                 profile[(i + interval) % 12] = weight
             profile /= profile.sum() + 1e-9
             profiles[f"{root}{suffix}"] = profile
-
     return profiles
 
 CHORD_PROFILES = _build_chord_profiles()
 
 
-NOTE_NAMES_CD = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-
-def _build_chord_profiles() -> dict:
-    """
-    Root note-д хамгийн өндөр жин өгсөн chord профайл.
-    7th chord-уудыг мажор/минор-оос ялгахын тулд
-    7th нотын жинг бага, root-ын жинг өндөр болгосон.
-    """
-    profiles = {}
-
-    interval_map = {
-        "":     [(0, 2.0), (4, 0.8), (7, 1.2)],
-        "m":    [(0, 2.0), (3, 0.8), (7, 1.2)],
-        "7":    [(0, 1.5), (4, 0.8), (7, 1.0), (10, 1.5)],
-        "maj7": [(0, 1.5), (4, 0.8), (7, 1.0), (11, 1.5)],
-        "min7": [(0, 1.5), (3, 0.8), (7, 1.0), (10, 1.5)],
-        "sus2": [(0, 2.0), (2, 1.0), (7, 1.2)],
-        "sus4": [(0, 2.0), (5, 1.0), (7, 1.2)],
-        "dim":  [(0, 2.0), (3, 0.8), (6, 1.0)],
-        "aug":  [(0, 2.0), (4, 0.8), (8, 1.0)],
-    }
-
-    for suffix, weighted_intervals in interval_map.items():
-        for i, root in enumerate(NOTE_NAMES_CD):
-            profile = np.zeros(12)
-            for interval, weight in weighted_intervals:
-                profile[(i + interval) % 12] = weight
-            profile /= profile.sum() + 1e-9
-            profiles[f"{root}{suffix}"] = profile
-
-    return profiles
-
-CHORD_PROFILES = _build_chord_profiles()
-
-
-@app.post(
-    "/chords/detect",
-    summary="Гитарын chord таних",
-    tags=["Chords"],
-)
+@app.post("/chords/detect", summary="Гитарын chord таних", tags=["Chords"])
 async def detect_chord(
     audio: UploadFile = File(..., description="Audio файл (m4a/wav/mp3)"),
 ):
@@ -495,7 +323,6 @@ async def detect_chord(
     print(f"[CHORD] content_type={ct!r} filename={audio.filename!r}")
 
     audio_bytes = await audio.read()
-
     if len(audio_bytes) < 1000:
         raise HTTPException(status_code=400, detail="Файл хэт жижиг.")
 
@@ -509,19 +336,17 @@ async def detect_chord(
         for chord_name, profile in CHORD_PROFILES.items():
             score = _cosine(chroma, profile)
 
-            # Root note-ын chroma эрчим харгалзах
-            # Chord нэрнээс root note-ийг олно
-            raw = chord_name
+            # Root note boost: chord-ийн root нот chroma-д чанга байвал оноо нэмэх
+            # Sharp нотыг эхлээд шалгана (C# нь C-ийн өмнө орох ёстой)
             root_name = None
             for n in ["C#", "D#", "F#", "G#", "A#", "C", "D", "E", "F", "G", "A", "B"]:
-                if raw.startswith(n):
+                if chord_name.startswith(n):
                     root_name = n
                     break
 
-            if root_name and root_name in NOTE_NAMES_CD:
-                root_idx = NOTE_NAMES_CD.index(root_name)
+            if root_name and root_name in NOTE_NAMES:
+                root_idx = NOTE_NAMES.index(root_name)
                 root_energy = float(chroma[root_idx])
-                # Root note чанга байвал оноо нэмэх
                 score = score * (1.0 + root_energy * 0.5)
 
             if score > best_score:
@@ -539,67 +364,6 @@ async def detect_chord(
             "tempo_bpm": f.tempo_bpm,
         }
 
-    except Exception as exc:
-        print(f"[CHORD] ERROR: {exc}")
-        raise HTTPException(status_code=500, detail=f"Chord detection алдаа: {exc}")
-    
-# ─────────────────────────────────────────────────────────────────────────────
-# CHORD DETECTION ROUTE
-# ─────────────────────────────────────────────────────────────────────────────
-
-NOTE_NAMES_CD = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-
-def _build_chord_profiles() -> dict:
-    profiles = {}
-    interval_map = {
-        "":     [0, 4, 7],
-        "m":    [0, 3, 7],
-        "7":    [0, 4, 7, 10],
-        "maj7": [0, 4, 7, 11],
-        "min7": [0, 3, 7, 10],
-    }
-    for suffix, intervals in interval_map.items():
-        for i, root in enumerate(NOTE_NAMES_CD):
-            profile = np.zeros(12)
-            for interval in intervals:
-                profile[(i + interval) % 12] = 1.0
-            profile /= profile.sum()
-            profiles[f"{root}{suffix}"] = profile
-    return profiles
-
-CHORD_PROFILES = _build_chord_profiles()
-
-
-@app.post(
-    "/chords/detect",
-    summary="Гитарын chord таних",
-    tags=["Chords"],
-)
-async def detect_chord(
-    audio: UploadFile = File(..., description="Audio файл (m4a/wav/mp3)"),
-):
-    audio_bytes = await audio.read()
-    if len(audio_bytes) < 1000:
-        raise HTTPException(status_code=400, detail="Файл хэт жижиг.")
-    try:
-        f = extract_features(audio_bytes)
-        chroma = np.array(f.chroma_vector)
-        best_chord = "Unknown"
-        best_score = -1.0
-        for chord_name, profile in CHORD_PROFILES.items():
-            score = _cosine(chroma, profile)
-            if score > best_score:
-                best_score = score
-                best_chord = chord_name
-        confidence = round(float(best_score) * 100, 1)
-        print(f"[CHORD] detected={best_chord} confidence={confidence}%")
-        return {
-            "chord": best_chord,
-            "chord_name": best_chord,
-            "confidence": confidence,
-            "dominant_note": f.dominant_note,
-            "tempo_bpm": f.tempo_bpm,
-        }
     except Exception as exc:
         print(f"[CHORD] ERROR: {exc}")
         raise HTTPException(status_code=500, detail=f"Chord detection алдаа: {exc}")
@@ -639,7 +403,7 @@ class SkillAnalysis(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. RAW FEATURE EXTRACTION  (librosa)
+# 1. RAW FEATURE EXTRACTION
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass
 class RawFeatures:
@@ -663,36 +427,26 @@ class RawFeatures:
 
 
 def _detect_format(header: bytes) -> str:
-    if header[:4] == b'RIFF':
-        return 'wav'
-    if header[:3] == b'ID3' or header[:2] == b'\xff\xfb' or header[:2] == b'\xff\xf3' or header[:2] == b'\xff\xf2':
-        return 'mp3'
-    if header[:2] in (b'\xff\xf1', b'\xff\xf9'):
-        return 'aac'
-    if header[4:8] in (b'ftyp', b'moov') or header[:4] in (b'\x00\x00\x00\x18', b'\x00\x00\x00\x20'):
-        return 'm4a'
-    if header[:4] == b'OggS':
-        return 'ogg'
-    if header[:4] == b'fLaC':
-        return 'flac'
+    if header[:4] == b'RIFF': return 'wav'
+    if header[:3] == b'ID3' or header[:2] in (b'\xff\xfb', b'\xff\xf3', b'\xff\xf2'): return 'mp3'
+    if header[:2] in (b'\xff\xf1', b'\xff\xf9'): return 'aac'
+    if header[4:8] in (b'ftyp', b'moov') or header[:4] in (b'\x00\x00\x00\x18', b'\x00\x00\x00\x20'): return 'm4a'
+    if header[:4] == b'OggS': return 'ogg'
+    if header[:4] == b'fLaC': return 'flac'
     return 'wav'
 
 
 def _get_ffmpeg():
     path = shutil.which("ffmpeg")
-    if path:
-        return path
-    local_ffmpeg = os.path.join(os.path.dirname(__file__), "ffmpeg", "ffmpeg-master-latest-win64-gpl", "bin", "ffmpeg.exe")
-    if os.path.isfile(local_ffmpeg):
-        return local_ffmpeg
+    if path: return path
+    local = os.path.join(os.path.dirname(__file__), "ffmpeg",
+                         "ffmpeg-master-latest-win64-gpl", "bin", "ffmpeg.exe")
+    if os.path.isfile(local): return local
     try:
-        result = subprocess.run(
-            ["find", "/nix/store", "-name", "ffmpeg", "-type", "f"],
-            capture_output=True, text=True, timeout=10,
-        )
+        result = subprocess.run(["find", "/nix/store", "-name", "ffmpeg", "-type", "f"],
+                                capture_output=True, text=True, timeout=10)
         paths = [p for p in result.stdout.strip().split("\n") if p and "/bin/ffmpeg" in p]
-        if paths:
-            return paths[0]
+        if paths: return paths[0]
     except Exception:
         pass
     return None
@@ -704,18 +458,15 @@ print(f"[FFMPEG] path={_FFMPEG}")
 def _load_audio(audio_bytes: bytes):
     fmt = _detect_format(audio_bytes[:16])
     print(f"[LOAD] detected format={fmt}")
-
     if _FFMPEG:
         tmp_in = tmp_out = None
         try:
             with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as f:
-                f.write(audio_bytes)
-                tmp_in = f.name
+                f.write(audio_bytes); tmp_in = f.name
             tmp_out = tmp_in + "_out.wav"
             result = subprocess.run(
                 [_FFMPEG, "-y", "-i", tmp_in, "-ar", "22050", "-ac", "1", "-f", "wav", tmp_out],
-                capture_output=True,
-            )
+                capture_output=True)
             if result.returncode == 0:
                 y, sr = librosa.load(tmp_out, mono=True, sr=16000, duration=120)
                 print(f"[LOAD] ffmpeg OK sr={sr}")
@@ -725,9 +476,7 @@ def _load_audio(audio_bytes: bytes):
             print(f"[LOAD] ffmpeg failed: {e}")
         finally:
             for p in [tmp_in, tmp_out]:
-                if p and os.path.exists(p):
-                    os.unlink(p)
-
+                if p and os.path.exists(p): os.unlink(p)
     try:
         import soundfile as sf
         y, sr = sf.read(io.BytesIO(audio_bytes))
@@ -736,7 +485,6 @@ def _load_audio(audio_bytes: bytes):
         return y, sr
     except Exception as e:
         print(f"[LOAD] soundfile failed: {e}")
-
     y, sr = librosa.load(io.BytesIO(audio_bytes), mono=True, sr=16000, duration=120)
     print(f"[LOAD] librosa OK sr={sr}")
     return y, sr
@@ -744,7 +492,6 @@ def _load_audio(audio_bytes: bytes):
 
 def extract_features(audio_bytes: bytes) -> RawFeatures:
     y, sr = _load_audio(audio_bytes)
-
     duration = librosa.get_duration(y=y, sr=sr)
 
     tempo_arr, beats = librosa.beat.beat_track(y=y, sr=sr)
@@ -766,23 +513,22 @@ def extract_features(audio_bytes: bytes) -> RawFeatures:
         onset_regularity = 0.3
 
     rms = librosa.feature.rms(y=y)[0]
-    db  = librosa.amplitude_to_db(rms, ref=np.max)
+    db = librosa.amplitude_to_db(rms, ref=np.max)
     dynamic_range_db = float(np.max(db) - np.min(db))
-    rms_std_db       = float(np.std(db))
-    silence_ratio    = float(np.mean(rms < 0.005))
+    rms_std_db = float(np.std(db))
+    silence_ratio = float(np.mean(rms < 0.005))
 
-    sc  = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    sc = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
     sbw = librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
     zcr = librosa.feature.zero_crossing_rate(y)[0]
 
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-    note_names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-    note_energy = {note_names[i]: float(np.mean(chroma[i])) for i in range(12)}
-    dominant_note   = max(note_energy, key=note_energy.get)
-    active_notes    = sum(1 for v in note_energy.values() if v > 0.25)
+    note_energy = {NOTE_NAMES[i]: float(np.mean(chroma[i])) for i in range(12)}
+    dominant_note = max(note_energy, key=note_energy.get)
+    active_notes = sum(1 for v in note_energy.values() if v > 0.25)
     vals = np.array(list(note_energy.values())) + 1e-9
     vals /= vals.sum()
-    chroma_entropy  = float(-np.sum(vals * np.log2(vals)))
+    chroma_entropy = float(-np.sum(vals * np.log2(vals)))
 
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
     mfcc_variance = float(np.mean(np.var(mfcc, axis=1)))
@@ -792,8 +538,7 @@ def extract_features(audio_bytes: bytes) -> RawFeatures:
     chroma_vector = [round(float(v / norm), 4) for v in chroma_mean]
 
     return RawFeatures(
-        duration_sec=round(duration, 1),
-        sr=int(sr),
+        duration_sec=round(duration, 1), sr=int(sr),
         tempo_bpm=round(tempo_bpm, 1),
         rhythm_stability=round(rhythm_stability, 3),
         onset_regularity=round(onset_regularity, 3),
@@ -818,72 +563,45 @@ def extract_features(audio_bytes: bytes) -> RawFeatures:
 def clamp(val: float, lo: float = 0.0, hi: float = 100.0) -> int:
     return int(max(lo, min(hi, val)))
 
-
 def score_rhythm(f: RawFeatures) -> int:
     base = (f.rhythm_stability * 0.6 + f.onset_regularity * 0.4) * 100
-    tempo_penalty = 0.0
-    if f.tempo_bpm < 40 or f.tempo_bpm > 220:
-        tempo_penalty = 15.0
+    tempo_penalty = 15.0 if f.tempo_bpm < 40 or f.tempo_bpm > 220 else 0.0
     return clamp(base - tempo_penalty)
-
 
 def score_dynamics(f: RawFeatures) -> int:
     dr = f.dynamic_range_db
-    if dr < 5:
-        range_score = 20.0
-    elif dr < 15:
-        range_score = 40.0 + (dr - 5) * 3.0
-    elif dr < 40:
-        range_score = 70.0 + (dr - 15) * 0.8
-    else:
-        range_score = 90.0
-    silence_penalty = min(f.silence_ratio * 80, 30.0)
-    return clamp(range_score - silence_penalty)
-
+    if dr < 5: range_score = 20.0
+    elif dr < 15: range_score = 40.0 + (dr - 5) * 3.0
+    elif dr < 40: range_score = 70.0 + (dr - 15) * 0.8
+    else: range_score = 90.0
+    return clamp(range_score - min(f.silence_ratio * 80, 30.0))
 
 def score_clarity(f: RawFeatures) -> int:
-    if f.active_note_count < 2:
-        note_score = 20.0
-    elif f.active_note_count <= 6:
-        note_score = 50.0 + f.active_note_count * 8.0
-    else:
-        note_score = max(30.0, 98.0 - (f.active_note_count - 6) * 10)
-
+    if f.active_note_count < 2: note_score = 20.0
+    elif f.active_note_count <= 6: note_score = 50.0 + f.active_note_count * 8.0
+    else: note_score = max(30.0, 98.0 - (f.active_note_count - 6) * 10)
     ent = f.chroma_entropy
-    if ent < 1.5:
-        ent_score = 30.0
-    elif ent < 2.5:
-        ent_score = 50.0 + (ent - 1.5) * 20.0
-    elif ent <= 3.3:
-        ent_score = 70.0 + (ent - 2.5) * 25.0
-    else:
-        ent_score = 85.0
-
+    if ent < 1.5: ent_score = 30.0
+    elif ent < 2.5: ent_score = 50.0 + (ent - 1.5) * 20.0
+    elif ent <= 3.3: ent_score = 70.0 + (ent - 2.5) * 25.0
+    else: ent_score = 85.0
     return clamp(note_score * 0.5 + ent_score * 0.5)
-
 
 def score_consistency(f: RawFeatures) -> int:
     reg_score = f.onset_regularity * 100
     rate = f.onset_rate
-    if rate < 1.0:
-        rate_bonus = -20.0
-    elif rate <= 6.0:
-        rate_bonus = 10.0
-    elif rate <= 10.0:
-        rate_bonus = 0.0
-    else:
-        rate_bonus = -15.0
+    if rate < 1.0: rate_bonus = -20.0
+    elif rate <= 6.0: rate_bonus = 10.0
+    elif rate <= 10.0: rate_bonus = 0.0
+    else: rate_bonus = -15.0
     return clamp(reg_score + rate_bonus)
 
 
 def _chord_to_chroma(notes: list[str]) -> np.ndarray:
-    NOTE_IDX = {"C":0,"C#":1,"D":2,"D#":3,"E":4,"F":5,
-                "F#":6,"G":7,"G#":8,"A":9,"A#":10,"B":11}
+    NOTE_IDX = {n: i for i, n in enumerate(NOTE_NAMES)}
     vec = np.zeros(12)
-    for n in notes:
-        vec[NOTE_IDX[n]] += 1.0
+    for n in notes: vec[NOTE_IDX[n]] += 1.0
     return vec / (vec.sum() + 1e-9)
-
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
@@ -905,9 +623,8 @@ ALAYLM_PROFILE = (
 )
 ALAYLM_PROFILE /= ALAYLM_PROFILE.sum() + 1e-9
 
-RIPTIDE_BPM  = 93.0
-ALAYLM_BPM   = 100.0
-
+RIPTIDE_BPM = 93.0
+ALAYLM_BPM  = 100.0
 
 def _bpm_score(detected: float, target: float, tol: float = 12.0) -> float:
     for mult in (1.0, 0.5, 2.0):
@@ -915,35 +632,19 @@ def _bpm_score(detected: float, target: float, tol: float = 12.0) -> float:
             return 1.0 - abs(detected - target * mult) / tol
     return 0.0
 
-
 def detect_song(f: RawFeatures) -> str:
-    if not f.chroma_vector:
-        return "Тодорхойгүй"
-
+    if not f.chroma_vector: return "Тодорхойгүй"
     cv = np.array(f.chroma_vector)
-    riptide_chroma  = _cosine(cv, RIPTIDE_PROFILE)
-    alaylm_chroma   = _cosine(cv, ALAYLM_PROFILE)
-    riptide_bpm  = _bpm_score(f.tempo_bpm, RIPTIDE_BPM)
-    alaylm_bpm   = _bpm_score(f.tempo_bpm, ALAYLM_BPM)
-    riptide_total = riptide_chroma * 0.70 + riptide_bpm * 0.30
-    alaylm_total  = alaylm_chroma  * 0.70 + alaylm_bpm  * 0.30
-
-    THRESHOLD = 0.45
-    best_score = max(riptide_total, alaylm_total)
-    if best_score < THRESHOLD:
-        return "Тодорхойгүй"
-    if riptide_total >= alaylm_total:
-        return "Riptide — Vance Joy"
-    return "As Long As You Love Me — Justin Bieber"
-
+    r_c = _cosine(cv, RIPTIDE_PROFILE); a_c = _cosine(cv, ALAYLM_PROFILE)
+    r_b = _bpm_score(f.tempo_bpm, RIPTIDE_BPM); a_b = _bpm_score(f.tempo_bpm, ALAYLM_BPM)
+    r_t = r_c * 0.70 + r_b * 0.30; a_t = a_c * 0.70 + a_b * 0.30
+    if max(r_t, a_t) < 0.45: return "Тодорхойгүй"
+    return "Riptide — Vance Joy" if r_t >= a_t else "As Long As You Love Me — Justin Bieber"
 
 def level_from_score(score: int) -> str:
-    if score >= 82:
-        return "Professional"
-    if score >= 62:
-        return "Advanced"
-    if score >= 38:
-        return "Intermediate"
+    if score >= 82: return "Professional"
+    if score >= 62: return "Advanced"
+    if score >= 38: return "Intermediate"
     return "Beginner"
 
 
@@ -953,185 +654,101 @@ def level_from_score(score: int) -> str:
 def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) -> dict:
     level = level_from_score(total)
     song  = detect_song(f)
+    bpm   = f.tempo_bpm
 
-    bpm = f.tempo_bpm
-    if bpm < 60:
-        tempo_feel = f"Удаан ({bpm:.0f} BPM) — suranзалтай темп"
-    elif bpm < 80:
-        tempo_feel = f"Зөөлөн удаан ({bpm:.0f} BPM)"
-    elif bpm < 100:
-        tempo_feel = f"Дундаж хурд ({bpm:.0f} BPM) — ердийн acoustic guitar темп"
-    elif bpm < 130:
-        tempo_feel = f"Хурдан ({bpm:.0f} BPM)"
-    else:
-        tempo_feel = f"Маш хурдан ({bpm:.0f} BPM)"
+    if bpm < 60: tempo_feel = f"Удаан ({bpm:.0f} BPM)"
+    elif bpm < 80: tempo_feel = f"Зөөлөн удаан ({bpm:.0f} BPM)"
+    elif bpm < 100: tempo_feel = f"Дундаж хурд ({bpm:.0f} BPM)"
+    elif bpm < 130: tempo_feel = f"Хурдан ({bpm:.0f} BPM)"
+    else: tempo_feel = f"Маш хурдан ({bpm:.0f} BPM)"
 
-    if r >= 80:
-        rhythm_accuracy = "Маш сайн — хэмнэл тогтвортой, найдвартай"
-    elif r >= 60:
-        rhythm_accuracy = "Сайн — жижиг хэлбэлзэл байгаа ч ерөнхийдөө тогтвортой"
-    elif r >= 40:
-        rhythm_accuracy = "Дундаж — хэмнэл тогтворгүй хэсгүүд бий"
-    else:
-        rhythm_accuracy = "Хангалтгүй — хэмнэл ихээхэн хэлбэлзэлтэй"
+    if r >= 80: rhythm_accuracy = "Маш сайн — хэмнэл тогтвортой, найдвартай"
+    elif r >= 60: rhythm_accuracy = "Сайн — жижиг хэлбэлзэл байгаа ч тогтвортой"
+    elif r >= 40: rhythm_accuracy = "Дундаж — хэмнэл тогтворгүй хэсгүүд бий"
+    else: rhythm_accuracy = "Хангалтгүй — хэмнэл ихээхэн хэлбэлзэлтэй"
 
-    if cl >= 75:
-        chord_clarity = "Маш тод — аккорд цэвэр дарагдаж байна"
-    elif cl >= 55:
-        chord_clarity = "Тод — ерөнхийдөө тодорхой, бага зэрэг бузрал бий"
-    elif cl >= 35:
-        chord_clarity = "Бүдэг — аккорд бузартсан (buzzing) хэсгүүд байна"
-    else:
-        chord_clarity = "Тодорхойгүй — аккорд нарийвчлал хэрэгтэй"
+    if cl >= 75: chord_clarity = "Маш тод — аккорд цэвэр дарагдаж байна"
+    elif cl >= 55: chord_clarity = "Тод — ерөнхийдөө тодорхой, бага зэрэг бузрал бий"
+    elif cl >= 35: chord_clarity = "Бүдэг — аккорд бузартсан хэсгүүд байна"
+    else: chord_clarity = "Тодорхойгүй — аккорд нарийвчлал хэрэгтэй"
 
-    if d >= 75:
-        dynamic_range = f"Өргөн ({f.dynamic_range_db:.0f} dB) — сайн динамик хяналт"
-    elif d >= 50:
-        dynamic_range = f"Дундаж ({f.dynamic_range_db:.0f} dB)"
-    else:
-        dynamic_range = f"Нарийн ({f.dynamic_range_db:.0f} dB) — динамик хяналт хэрэгтэй"
+    if d >= 75: dynamic_range = f"Өргөн ({f.dynamic_range_db:.0f} dB) — сайн динамик хяналт"
+    elif d >= 50: dynamic_range = f"Дундаж ({f.dynamic_range_db:.0f} dB)"
+    else: dynamic_range = f"Нарийн ({f.dynamic_range_db:.0f} dB) — динамик хяналт хэрэгтэй"
 
     strengths = []
-    if r >= 65:
-        strengths.append("Хэмнэл тогтвортой, beat алдагдахгүй тоглож байна")
-    if d >= 65:
-        strengths.append("Динамик хэлбэлзэл сайн — чанга/намхан хэсгийг ялган тоглодог")
-    if cl >= 65:
-        strengths.append("Аккорд тодорхой, string мулталт бага")
-    if co >= 65:
-        strengths.append("Цохилт тогтмол, strumming/picking жигд")
-    if f.silence_ratio < 0.05:
-        strengths.append("Тасралтгүй тоглолт — дуу урсгалтай")
-    if not strengths:
-        strengths.append("Тоглох хүсэл эрмэлзэл харагдаж байна — дадлага үргэлжлүүлнэ үү")
+    if r >= 65: strengths.append("Хэмнэл тогтвортой, beat алдагдахгүй тоглож байна")
+    if d >= 65: strengths.append("Динамик хэлбэлзэл сайн — чанга/намхан хэсгийг ялган тоглодог")
+    if cl >= 65: strengths.append("Аккорд тодорхой, string мулталт бага")
+    if co >= 65: strengths.append("Цохилт тогтмол, strumming/picking жигд")
+    if f.silence_ratio < 0.05: strengths.append("Тасралтгүй тоглолт — дуу урсгалтай")
+    if not strengths: strengths.append("Тоглох хүсэл эрмэлзэл харагдаж байна — дадлага үргэлжлүүлнэ үү")
 
     areas = []
-    if r < 60:
-        areas.append("Хэмнэлийн тогтвортой байдал — метроном ашиглан дадлага хий")
-    if cl < 55:
-        areas.append("Аккордын дарлага — хуруу байрлал, дарах хүч нарийвчлах")
-    if d < 50:
-        areas.append("Динамик хяналт — нам ба чанга хэсгийг ухамсартайгаар ялгах")
-    if co < 55:
-        areas.append("Strumming/picking тогтмол байдал — хэв маяг дагаж дадлага хий")
-    if f.silence_ratio > 0.15:
-        areas.append("Аккорд шилжилтийн хурд — тасралтыг багасгах")
-    if not areas:
-        areas.append("Илүү нарийн техник (vibrato, fingerpicking) сурах")
+    if r < 60: areas.append("Хэмнэлийн тогтвортой байдал — метроном ашиглан дадлага хий")
+    if cl < 55: areas.append("Аккордын дарлага — хуруу байрлал, дарах хүч нарийвчлах")
+    if d < 50: areas.append("Динамик хяналт — нам ба чанга хэсгийг ухамсартайгаар ялгах")
+    if co < 55: areas.append("Strumming/picking тогтмол байдал — хэв маяг дагаж дадлага хий")
+    if f.silence_ratio > 0.15: areas.append("Аккорд шилжилтийн хурд — тасралтыг багасгах")
+    if not areas: areas.append("Илүү нарийн техник (vibrato, fingerpicking) сурах")
 
     tips = []
-    if r < 65:
-        tips.append(
-            "Метроном 70 BPM-с эхлээд дуртай дуугаа тоглох дадлага хий. "
-            "Хэмнэл тогтвортой болсны дараа BPM нэмэ."
-        )
-    else:
-        tips.append(
-            "Метроном ашиглаж байгаа бол BPM-ийг аажмаар ихэсгэж хурдыг нэмэгдүүл."
-        )
+    tips.append("Метроном 70 BPM-с эхлээд дуртай дуугаа тоглох дадлага хий." if r < 65
+                else "Метроном ашиглаж байгаа бол BPM-ийг аажмаар ихэсгэж хурдыг нэмэгдүүл.")
+    tips.append("Аккорд бүрийг тусад нь дарж, string бүр тод дуугарч байгааг шалга." if cl < 60
+                else "Аккорд шилжилтийн хурдыг нэмэх — Am→F→C→G дараалалд timer тавьж дадла.")
+    tips.append("Намхан болон чанга хэсгийг ухамсартайгаар тоглох дадлага хий." if d < 55
+                else "Fingerpicking техник нэмж, ганц нотоор melody тоглох дадлагыг туршиж үз.")
 
-    if cl < 60:
-        tips.append(
-            "Аккорд бүрийг тусад нь дарж, string бүр тод дуугарч байгааг шалга. "
-            "Хуруу байрлалаа тохируулаад дараа нь аккорд шилжилтийн дадлага хий."
-        )
-    else:
-        tips.append(
-            "Аккорд шилжилтийн хурдыг нэмэх — Am→F→C→G дараалалд timer тавьж дадла."
-        )
-
-    if d < 55:
-        tips.append(
-            "Намхан (piano) болон чанга (forte) хэсгийг ухамсартайгаар тоглох дадлага хий. "
-            "Ялгаа их байх тусам сонсогдох чанар сайжирна."
-        )
-    else:
-        tips.append(
-            "Fingerpicking техник нэмж, ганц нотоор melody тоглох дадлагыг туршиж үз."
-        )
-
-    level_desc = {
-        "Beginner":      "Эхлэгч түвшний тоглогч.",
-        "Intermediate":  "Дундаж түвшний тоглогч.",
-        "Advanced":      "Дэвшилтэт түвшний тоглогч.",
-        "Professional":  "Мэргэжлийн түвшний тоглогч.",
-    }[level]
-
+    level_desc = {"Beginner": "Эхлэгч түвшний тоглогч.",
+                  "Intermediate": "Дундаж түвшний тоглогч.",
+                  "Advanced": "Дэвшилтэт түвшний тоглогч.",
+                  "Professional": "Мэргэжлийн түвшний тоглогч."}[level]
     weak = []
-    if r < 60:     weak.append("хэмнэл")
-    if cl < 55:    weak.append("аккордын тодрол")
-    if d < 50:     weak.append("динамик")
-    if co < 55:    weak.append("цохилтын тогтвортой байдал")
+    if r < 60: weak.append("хэмнэл")
+    if cl < 55: weak.append("аккордын тодрол")
+    if d < 50: weak.append("динамик")
+    if co < 55: weak.append("цохилтын тогтвортой байдал")
 
     if weak:
-        weak_str = "、".join(weak)
-        overall = (
-            f"{level_desc} Нийт оноо {total}/100. "
-            f"{weak_str}-ыг сайжруулбал дараагийн түвшинд гарна. "
-            f"Өдөр бүр 20-30 минут тогтмол дадлага хийх нь хамгийн үр дүнтэй."
-        )
+        overall = (f"{level_desc} Нийт оноо {total}/100. "
+                   f"{'、'.join(weak)}-ыг сайжруулбал дараагийн түвшинд гарна. "
+                   f"Өдөр бүр 20-30 минут тогтмол дадлага хийх нь хамгийн үр дүнтэй.")
     else:
-        overall = (
-            f"{level_desc} Нийт оноо {total}/100. "
-            f"Бүх үзүүлэлт сайн байна — илүү нарийн техник болон хэлбэр сурах цаг боллоо. "
-            f"Бичлэг хийж өөрийгөө сонсох нь ахиц дэвшлийг мэдрэхэд тусална."
-        )
+        overall = (f"{level_desc} Нийт оноо {total}/100. "
+                   f"Бүх үзүүлэлт сайн байна — илүү нарийн техник сурах цаг боллоо.")
 
-    return dict(
-        skill_level=level,
-        skill_score=total,
-        song_detected=song,
-        duration_seconds=f.duration_sec,
-        tempo_bpm=f.tempo_bpm,
-        tempo_feel=tempo_feel,
-        rhythm_accuracy=rhythm_accuracy,
-        chord_clarity=chord_clarity,
-        dynamic_range=dynamic_range,
-        strengths=strengths,
-        areas_to_improve=areas,
-        practice_tips=tips,
-        overall_feedback=overall,
-    )
+    return dict(skill_level=level, skill_score=total, song_detected=song,
+                duration_seconds=f.duration_sec, tempo_bpm=f.tempo_bpm,
+                tempo_feel=tempo_feel, rhythm_accuracy=rhythm_accuracy,
+                chord_clarity=chord_clarity, dynamic_range=dynamic_range,
+                strengths=strengths, areas_to_improve=areas,
+                practice_tips=tips, overall_feedback=overall)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. ANALYZE PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
 def analyze_pipeline(audio_bytes: bytes) -> SkillAnalysis:
-    f = extract_features(audio_bytes)
-
+    f  = extract_features(audio_bytes)
     r  = score_rhythm(f)
     d  = score_dynamics(f)
     cl = score_clarity(f)
     co = score_consistency(f)
-
     total = clamp(r * 0.40 + d * 0.15 + cl * 0.25 + co * 0.20)
-
     feedback = make_feedback(f, r, d, cl, co, total)
-
-    feedback["rhythm_score"]      = r
-    feedback["dynamics_score"]    = d
-    feedback["clarity_score"]     = cl
-    feedback["consistency_score"] = co
-
+    feedback["rhythm_score"] = r; feedback["dynamics_score"] = d
+    feedback["clarity_score"] = cl; feedback["consistency_score"] = co
     return SkillAnalysis(**feedback)
 
 
 @app.get("/")
 async def root():
-    return {
-        "name": "Guitar Skill Analyzer — Local",
-        "version": "4.0.0",
-        "description": "Гадаад API-гүй — librosa + chord-profile cosine similarity",
-        "endpoints": {
-            "POST /analyze":       "Бүрэн шинжилгээ + ур чадварын үнэлгээ",
-            "POST /chords/detect": "Chord таних",
-            "POST /debug":         "Chroma vector + similarity оноо харах",
-        },
-        "formats": ["wav", "mp3", "m4a", "flac", "ogg", "webm"],
-        "max_mb": MAX_FILE_MB,
-        "docs": "/docs",
-    }
+    return {"name": "Guitar Skill Analyzer", "version": "4.0.0",
+            "endpoints": {"POST /analyze": "Бүрэн шинжилгээ",
+                          "POST /chords/detect": "Chord таних (108 chord)"},
+            "formats": ["wav", "mp3", "m4a", "flac", "ogg", "webm"],
+            "max_mb": MAX_FILE_MB, "docs": "/docs"}
 
 
 if __name__ == "__main__":
