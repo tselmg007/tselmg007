@@ -287,10 +287,14 @@ def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
 
     sent = _send_reset_email(req.email, code)
     if not sent:
-        raise HTTPException(
-            status_code=500,
-            detail="Email илгээхэд алдаа гарлаа. Дараа дахин оролдоно уу.",
-        )
+        if SMTP_EMAIL and SMTP_PASSWORD:
+            # SMTP тохируулагдсан ч илгээхэд алдаа гарсан
+            raise HTTPException(
+                status_code=500,
+                detail="Email илгээхэд алдаа гарлаа. Дараа дахин оролдоно уу.",
+            )
+        # SMTP тохируулагдаагүй үед (dev) — кодыг log-д хэвлэж, амжилттай хариулна
+        print(f"[EMAIL-DEV] {req.email} → код: {code}  (SMTP тохируулаагүй)")
 
     return {"message": "Баталгаажуулах код таны email рүү илгээгдлээ."}
 
