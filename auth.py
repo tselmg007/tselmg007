@@ -100,3 +100,9 @@ class ProfileResponse(BaseModel):
     phone:      str
     birthDate:  str
     level:      int
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr = Field(..., example="boldoo@example.mn")
+
+class SetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=6, example="NewPass123")

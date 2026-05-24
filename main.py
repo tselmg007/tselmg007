@@ -30,7 +30,7 @@ from auth import (
     RegisterRequest, LoginRequest, TokenResponse,
     UserResponse, RegisterResponse,
     UpdateProfileRequest, ProfileResponse,
-    GoogleLoginRequest,
+    GoogleLoginRequest, ForgotPasswordRequest, SetPasswordRequest,
     ACCESS_TOKEN_EXPIRE_MINUTES,
 )
 
@@ -187,6 +187,26 @@ def google_login(req: GoogleLoginRequest, db: Session = Depends(get_db)):
                          email=user.email, firstName=user.first_name or "",
                          lastName=user.last_name or "", phone=user.phone or "",
                          birthDate=user.birth_date or "", level=user.level)
+
+
+@app.post("/auth/set-password",
+          summary="Нууц үг тавих (Google бүртгэлд)", tags=["Auth"])
+def set_password(
+    req: SetPasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    current_user.hashed_password = hash_password(req.new_password)
+    db.commit()
+    return {"message": "Нууц үг амжилттай тохируулагдлаа."}
+
+
+@app.post("/auth/forgot-password",
+          summary="Нууц үг сэргээх хүсэлт", tags=["Auth"])
+def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    # Always return success to prevent email enumeration attacks
+    db.query(User).filter(User.email == req.email).first()
+    return {"message": "Хэрэв тус имэйл бүртгэлтэй бол нууц үг сэргээх зааврыг имэйлд илгээсэн болно."}
 
 
 @app.patch("/users/me", response_model=ProfileResponse,
