@@ -11,14 +11,11 @@ import shutil
 import subprocess
 import tempfile
 import warnings
-import smtplib
 import random
 import string
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 _email_executor = ThreadPoolExecutor(max_workers=2)
 
@@ -86,8 +83,8 @@ LEVEL_LABEL = {1: "Beginner", 2: "Intermediate", 3: "Advanced", 4: "Professional
 # ─────────────────────────────────────────────────────────────────────────────
 # EMAIL — Нууц үг сэргээх код илгээх
 # ─────────────────────────────────────────────────────────────────────────────
-SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")        # код илгээх Gmail хаяг
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")  # Gmail App Password
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")  # resend.com API key
+SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")          # илгээгч хаяг (Resend-д баталгаажуулсан)
 
 # Баталгаажуулах кодуудыг түр хадгалах (memory)
 # Бүтэц: { "email": {"code": "123456", "expires": datetime} }
@@ -100,49 +97,50 @@ def _generate_code() -> str:
 
 
 def _send_reset_email(to_email: str, code: str) -> bool:
-    """Хэрэглэгчийн email рүү баталгаажуулах код илгээнэ"""
-    if not SMTP_EMAIL or not SMTP_PASSWORD:
-        print("[EMAIL] АЛДАА: SMTP_EMAIL эсвэл SMTP_PASSWORD тохируулагдаагүй")
+    """Resend API-р баталгаажуулах код илгээнэ (HTTPS, port 443)"""
+    if not RESEND_API_KEY:
+        print("[EMAIL] RESEND_API_KEY тохируулагдаагүй")
         return False
 
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = SMTP_EMAIL
-        msg["To"] = to_email
-        msg["Subject"] = "Guitar App — Нууц үг сэргээх код"
-
-        body = f"""
-        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
-            <h2 style="color: #6C5CE7;">Guitar Skill Analyzer</h2>
-            <p>Сайн байна уу,</p>
-            <p>Таны нууц үг сэргээх код:</p>
-            <div style="background: #f4f4f8; border-radius: 12px; padding: 20px;
-                        text-align: center; margin: 20px 0;">
-                <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px;
-                             color: #6C5CE7;">{code}</span>
-            </div>
-            <p style="color: #888; font-size: 13px;">
-                Энэ код 10 минутын дараа хүчингүй болно.<br>
-                Хэрэв та энэ хүсэлтийг илгээгээгүй бол энэ имэйлийг үл тоомсорлоно уу.
-            </p>
+    from_addr = SMTP_EMAIL if SMTP_EMAIL else "onboarding@resend.dev"
+    body = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2 style="color: #6C5CE7;">Guitar Skill Analyzer</h2>
+        <p>Сайн байна уу,</p>
+        <p>Таны нууц үг сэргээх код:</p>
+        <div style="background: #f4f4f8; border-radius: 12px; padding: 20px;
+                    text-align: center; margin: 20px 0;">
+            <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px;
+                         color: #6C5CE7;">{code}</span>
         </div>
-        """
-        msg.attach(MIMEText(body, "html"))
-
-        import ssl
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10, context=ctx) as server:
-            server.login(SMTP_EMAIL, SMTP_PASSWORD)
-            server.send_message(msg)
-
-        print(f"[EMAIL] Код амжилттай илгээгдлээ → {to_email}")
-        return True
-
-    except smtplib.SMTPAuthenticationError as exc:
-        print(f"[EMAIL] Auth алдаа: {exc} — App Password шалгана уу")
+        <p style="color: #888; font-size: 13px;">
+            Энэ код 10 минутын дараа хүчингүй болно.<br>
+            Хэрэв та энэ хүсэлтийг илгээгээгүй бол үл тоомсорлоно уу.
+        </p>
+    </div>
+    """
+    try:
+        resp = http_requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": from_addr,
+                "to": [to_email],
+                "subject": "Guitar App — Нууц үг сэргээх код",
+                "html": body,
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            print(f"[EMAIL] Амжилттай илгээгдлээ → {to_email}")
+            return True
+        print(f"[EMAIL] Resend алдаа {resp.status_code}: {resp.text}")
         return False
     except Exception as exc:
-        print(f"[EMAIL] Илгээхэд алдаа гарлаа ({type(exc).__name__}): {exc}")
+        print(f"[EMAIL] Илгээхэд алдаа ({type(exc).__name__}): {exc}")
         return False
 
 
@@ -304,10 +302,10 @@ async def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_
         sent = False
 
     if not sent:
-        if SMTP_EMAIL and SMTP_PASSWORD:
+        if RESEND_API_KEY:
             raise HTTPException(
                 status_code=500,
-                detail="Email илгээхэд алдаа гарлаа. Gmail App Password шалгана уу.",
+                detail="Email илгээхэд алдаа гарлаа. Resend API key шалгана уу.",
             )
         print(f"[EMAIL-DEV] {req.email} → код: {code}  (SMTP тохируулаагүй)")
 
