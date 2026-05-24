@@ -83,8 +83,9 @@ LEVEL_LABEL = {1: "Beginner", 2: "Intermediate", 3: "Advanced", 4: "Professional
 # ─────────────────────────────────────────────────────────────────────────────
 # EMAIL — Нууц үг сэргээх код илгээх
 # ─────────────────────────────────────────────────────────────────────────────
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")  # resend.com API key
-SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")          # илгээгч хаяг (Resend-д баталгаажуулсан)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+# Resend-д баталгаажуулсан домайн байвал тохируулна, үгүй бол onboarding@resend.dev ашиглана
+RESEND_FROM = os.getenv("RESEND_FROM", "onboarding@resend.dev")
 
 # Баталгаажуулах кодуудыг түр хадгалах (memory)
 # Бүтэц: { "email": {"code": "123456", "expires": datetime} }
@@ -102,7 +103,7 @@ def _send_reset_email(to_email: str, code: str) -> bool:
         print("[EMAIL] RESEND_API_KEY тохируулагдаагүй")
         return False
 
-    from_addr = SMTP_EMAIL if SMTP_EMAIL else "onboarding@resend.dev"
+    from_addr = RESEND_FROM
     body = f"""
     <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
         <h2 style="color: #6C5CE7;">Guitar Skill Analyzer</h2>
