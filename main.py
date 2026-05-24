@@ -4,6 +4,7 @@ Guitar Skill Level Analyzer — Pure Local Backend v4
 Бүх шинжилгээ librosa + numpy + дүрмэд суурилсан алгоритмаар
 серверийн дотоодод гүйцэтгэгдэнэ.
 """
+import asyncio
 import io
 import os
 import shutil
@@ -13,10 +14,13 @@ import warnings
 import smtplib
 import random
 import string
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+_email_executor = ThreadPoolExecutor(max_workers=2)
 
 import librosa
 import numpy as np
@@ -125,7 +129,7 @@ def _send_reset_email(to_email: str, code: str) -> bool:
         """
         msg.attach(MIMEText(body, "html"))
 
-        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
         server.starttls()
         server.login(SMTP_EMAIL, SMTP_PASSWORD)
         server.send_message(msg)
@@ -134,6 +138,9 @@ def _send_reset_email(to_email: str, code: str) -> bool:
         print(f"[EMAIL] Код амжилттай илгээгдлээ → {to_email}")
         return True
 
+    except smtplib.SMTPAuthenticationError:
+        print("[EMAIL] АЛДАА: Gmail нэвтрэлт буруу — App Password шалгана уу")
+        return False
     except Exception as exc:
         print(f"[EMAIL] Илгээхэд алдаа гарлаа: {exc}")
         return False
@@ -271,7 +278,7 @@ def set_password(
 
 @app.post("/auth/forgot-password",
           summary="Нууц үг мартсан — код илгээх", tags=["Auth"])
-def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
+async def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
     """Алхам 1: Хэрэглэгчийн email рүү 6 оронтой баталгаажуулах код илгээнэ"""
     user = db.query(User).filter(User.email == req.email).first()
 
@@ -285,15 +292,18 @@ def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
         "expires": datetime.utcnow() + timedelta(minutes=10),
     }
 
-    sent = _send_reset_email(req.email, code)
+    # SMTP блок хийхгүйн тулд thread pool дээр ажиллуулна
+    loop = asyncio.get_event_loop()
+    sent = await loop.run_in_executor(
+        _email_executor, _send_reset_email, req.email, code
+    )
+
     if not sent:
         if SMTP_EMAIL and SMTP_PASSWORD:
-            # SMTP тохируулагдсан ч илгээхэд алдаа гарсан
             raise HTTPException(
                 status_code=500,
-                detail="Email илгээхэд алдаа гарлаа. Дараа дахин оролдоно уу.",
+                detail="Email илгээхэд алдаа гарлаа. Gmail App Password шалгана уу.",
             )
-        # SMTP тохируулагдаагүй үед (dev) — кодыг log-д хэвлэж, амжилттай хариулна
         print(f"[EMAIL-DEV] {req.email} → код: {code}  (SMTP тохируулаагүй)")
 
     return {"message": "Баталгаажуулах код таны email рүү илгээгдлээ."}
