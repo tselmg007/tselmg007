@@ -12,6 +12,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "CHANGE_THIS_TO_A_LONG_RANDOM_SECRET_KEY_IN
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Password Hashing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,7 +78,7 @@ class UserResponse(BaseModel):
     created_at: datetime
 
     class Config:
-        from_attributes = True  # SQLAlchemy model-оос шууд унших
+        from_attributes = True
 
 class RegisterResponse(BaseModel):
     message: str
@@ -101,8 +102,24 @@ class ProfileResponse(BaseModel):
     birthDate:  str
     level:      int
 
+
+# ── Нууц үг сэргээх (Forgot Password) загварууд ─────────────────────────────
+
 class ForgotPasswordRequest(BaseModel):
+    """Алхам 1 — email рүү код илгээх хүсэлт"""
     email: EmailStr = Field(..., example="boldoo@example.mn")
 
+class VerifyCodeRequest(BaseModel):
+    """Алхам 2 — баталгаажуулах код шалгах"""
+    email: EmailStr = Field(..., example="boldoo@example.mn")
+    code:  str      = Field(..., min_length=4, max_length=8, example="123456")
+
+class ResetPasswordRequest(BaseModel):
+    """Алхам 3 — шинэ нууц үг тавих"""
+    email:        EmailStr = Field(..., example="boldoo@example.mn")
+    code:         str      = Field(..., min_length=4, max_length=8, example="123456")
+    new_password: str      = Field(..., min_length=6, example="NewPass123")
+
 class SetPasswordRequest(BaseModel):
+    """Google бүртгэлд нууц үг тавихад"""
     new_password: str = Field(..., min_length=6, example="NewPass123")

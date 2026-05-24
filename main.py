@@ -10,8 +10,13 @@ import shutil
 import subprocess
 import tempfile
 import warnings
+import smtplib
+import random
+import string
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 import librosa
 import numpy as np
@@ -31,6 +36,7 @@ from auth import (
     UserResponse, RegisterResponse,
     UpdateProfileRequest, ProfileResponse,
     GoogleLoginRequest, ForgotPasswordRequest, SetPasswordRequest,
+    VerifyCodeRequest, ResetPasswordRequest,
     ACCESS_TOKEN_EXPIRE_MINUTES,
 )
 
@@ -71,6 +77,66 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 LEVEL_LABEL = {1: "Beginner", 2: "Intermediate", 3: "Advanced", 4: "Professional"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EMAIL — Нууц үг сэргээх код илгээх
+# ─────────────────────────────────────────────────────────────────────────────
+SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")        # код илгээх Gmail хаяг
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")  # Gmail App Password
+
+# Баталгаажуулах кодуудыг түр хадгалах (memory)
+# Бүтэц: { "email": {"code": "123456", "expires": datetime} }
+_reset_codes: dict = {}
+
+
+def _generate_code() -> str:
+    """6 оронтой санамсаргүй код үүсгэнэ"""
+    return "".join(random.choices(string.digits, k=6))
+
+
+def _send_reset_email(to_email: str, code: str) -> bool:
+    """Хэрэглэгчийн email рүү баталгаажуулах код илгээнэ"""
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        print("[EMAIL] АЛДАА: SMTP_EMAIL эсвэл SMTP_PASSWORD тохируулагдаагүй")
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = SMTP_EMAIL
+        msg["To"] = to_email
+        msg["Subject"] = "Guitar App — Нууц үг сэргээх код"
+
+        body = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto;">
+            <h2 style="color: #6C5CE7;">Guitar Skill Analyzer</h2>
+            <p>Сайн байна уу,</p>
+            <p>Таны нууц үг сэргээх код:</p>
+            <div style="background: #f4f4f8; border-radius: 12px; padding: 20px;
+                        text-align: center; margin: 20px 0;">
+                <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px;
+                             color: #6C5CE7;">{code}</span>
+            </div>
+            <p style="color: #888; font-size: 13px;">
+                Энэ код 10 минутын дараа хүчингүй болно.<br>
+                Хэрэв та энэ хүсэлтийг илгээгээгүй бол энэ имэйлийг үл тоомсорлоно уу.
+            </p>
+        </div>
+        """
+        msg.attach(MIMEText(body, "html"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(SMTP_EMAIL, SMTP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"[EMAIL] Код амжилттай илгээгдлээ → {to_email}")
+        return True
+
+    except Exception as exc:
+        print(f"[EMAIL] Илгээхэд алдаа гарлаа: {exc}")
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,12 +267,83 @@ def set_password(
     return {"message": "Нууц үг амжилттай тохируулагдлаа."}
 
 
+# ── FORGOT PASSWORD — Email-ээр код илгээх 3 алхам ──────────────────────────
+
 @app.post("/auth/forgot-password",
-          summary="Нууц үг сэргээх хүсэлт", tags=["Auth"])
+          summary="Нууц үг мартсан — код илгээх", tags=["Auth"])
 def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    # Always return success to prevent email enumeration attacks
-    db.query(User).filter(User.email == req.email).first()
-    return {"message": "Хэрэв тус имэйл бүртгэлтэй бол нууц үг сэргээх зааврыг имэйлд илгээсэн болно."}
+    """Алхам 1: Хэрэглэгчийн email рүү 6 оронтой баталгаажуулах код илгээнэ"""
+    user = db.query(User).filter(User.email == req.email).first()
+
+    # Аюулгүй байдлын үүднээс — хэрэглэгч байхгүй ч "илгээсэн" гэж хариулна
+    if not user:
+        return {"message": "Хэрэв энэ email бүртгэлтэй бол код илгээгдсэн."}
+
+    code = _generate_code()
+    _reset_codes[req.email] = {
+        "code": code,
+        "expires": datetime.utcnow() + timedelta(minutes=10),
+    }
+
+    sent = _send_reset_email(req.email, code)
+    if not sent:
+        raise HTTPException(
+            status_code=500,
+            detail="Email илгээхэд алдаа гарлаа. Дараа дахин оролдоно уу.",
+        )
+
+    return {"message": "Баталгаажуулах код таны email рүү илгээгдлээ."}
+
+
+@app.post("/auth/verify-code",
+          summary="Баталгаажуулах код шалгах", tags=["Auth"])
+def verify_code(req: VerifyCodeRequest):
+    """Алхам 2: Хэрэглэгчийн оруулсан код зөв эсэхийг шалгана"""
+    entry = _reset_codes.get(req.email)
+
+    if not entry:
+        raise HTTPException(status_code=400,
+                            detail="Код олдсонгүй. Дахин код авна уу.")
+
+    if datetime.utcnow() > entry["expires"]:
+        del _reset_codes[req.email]
+        raise HTTPException(status_code=400,
+                            detail="Кодын хугацаа дууссан. Дахин код авна уу.")
+
+    if req.code != entry["code"]:
+        raise HTTPException(status_code=400, detail="Код буруу байна.")
+
+    return {"message": "Код зөв байна.", "verified": True}
+
+
+@app.post("/auth/reset-password",
+          summary="Шинэ нууц үг тавих", tags=["Auth"])
+def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Алхам 3: Код баталгаажуулсны дараа шинэ нууц үг хадгална"""
+    entry = _reset_codes.get(req.email)
+
+    if not entry:
+        raise HTTPException(status_code=400,
+                            detail="Код олдсонгүй. Дахин код авна уу.")
+
+    if datetime.utcnow() > entry["expires"]:
+        del _reset_codes[req.email]
+        raise HTTPException(status_code=400,
+                            detail="Кодын хугацаа дууссан. Дахин код авна уу.")
+
+    if req.code != entry["code"]:
+        raise HTTPException(status_code=400, detail="Код буруу байна.")
+
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Хэрэглэгч олдсонгүй.")
+
+    user.hashed_password = hash_password(req.new_password)
+    db.commit()
+
+    del _reset_codes[req.email]
+
+    return {"message": "Нууц үг амжилттай шинэчлэгдлээ."}
 
 
 @app.patch("/users/me", response_model=ProfileResponse,
@@ -228,7 +365,7 @@ def update_me(req: UpdateProfileRequest,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROFILE STATS ROUTES — тоглосон тоо, дадлагын цаг, түвшний түүх
+# PROFILE STATS ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/users/me/stats", summary="Хэрэглэгчийн нийт статистик", tags=["Profile"])
@@ -236,14 +373,6 @@ def get_my_stats(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Профайл хуудсанд харуулах нийт статистик:
-    - Нийт тоглосон тоо
-    - Нийт дадлагын цаг (минутаар)
-    - Апп ашигласан хугацаа (бүртгүүлснээс хойш өдрөөр)
-    - Дундаж оноо
-    - Одоогийн түвшин
-    """
     sessions = db.query(PracticeSession).filter(
         PracticeSession.user_id == current_user.id
     ).all()
@@ -255,10 +384,8 @@ def get_my_stats(
     scores = [s.score for s in sessions if s.score is not None]
     avg_score = round(sum(scores) / len(scores), 1) if scores else 0
 
-    # Апп ашигласан хугацаа — бүртгүүлснээс хойш өдрөөр
     days_since_register = (datetime.utcnow() - current_user.created_at).days if current_user.created_at else 0
 
-    # Энэ долоо хоногт тоглосон тоо
     week_ago = datetime.utcnow() - timedelta(days=7)
     weekly_sessions = sum(1 for s in sessions if s.created_at and s.created_at >= week_ago)
 
@@ -279,9 +406,6 @@ def get_my_history(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Сүүлийн 20 дадлагын бичлэг — огноо, оноо, үргэлжлэх хугацаа
-    """
     sessions = (
         db.query(PracticeSession)
         .filter(PracticeSession.user_id == current_user.id)
@@ -309,9 +433,6 @@ def get_level_history(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Beginner → Intermediate → Advanced гэх мэт түвшний өөрчлөлтийн бүх түүх
-    """
     history = (
         db.query(LevelHistory)
         .filter(LevelHistory.user_id == current_user.id)
@@ -403,7 +524,6 @@ async def analyze_guitar(
                 if user:
                     new_level = LEVEL_MAP.get(result.skill_level, 1)
 
-                    # ── Түвшин өөрчлөгдсөн бол LevelHistory-д бүртгэнэ ──────
                     if user.level != new_level:
                         history = LevelHistory(
                             user_id    = user.id,
@@ -414,7 +534,6 @@ async def analyze_guitar(
                         )
                         db.add(history)
 
-                    # ── Дадлагын session хадгална ─────────────────────────────
                     session = PracticeSession(
                         user_id          = user.id,
                         duration_seconds = int(result.duration_seconds),
@@ -424,7 +543,6 @@ async def analyze_guitar(
                     )
                     db.add(session)
 
-                    # ── Хэрэглэгчийн түвшинг шинэчилнэ ──────────────────────
                     user.level = new_level
                     db.commit()
 
@@ -881,6 +999,9 @@ async def root():
             "endpoints": {
                 "POST /analyze":             "Бүрэн шинжилгээ",
                 "POST /chords/detect":       "Chord таних (108 chord)",
+                "POST /auth/forgot-password": "Нууц үг сэргээх код илгээх",
+                "POST /auth/verify-code":    "Код шалгах",
+                "POST /auth/reset-password": "Шинэ нууц үг тавих",
                 "GET  /users/me/stats":      "Профайл статистик",
                 "GET  /users/me/history":    "Дадлагын түүх",
                 "GET  /users/me/level-history": "Түвшний өөрчлөлтийн түүх",
