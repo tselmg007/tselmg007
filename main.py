@@ -129,20 +129,20 @@ def _send_reset_email(to_email: str, code: str) -> bool:
         """
         msg.attach(MIMEText(body, "html"))
 
-        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
-        server.starttls()
-        server.login(SMTP_EMAIL, SMTP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
+        import ssl
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10, context=ctx) as server:
+            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+            server.send_message(msg)
 
         print(f"[EMAIL] Код амжилттай илгээгдлээ → {to_email}")
         return True
 
-    except smtplib.SMTPAuthenticationError:
-        print("[EMAIL] АЛДАА: Gmail нэвтрэлт буруу — App Password шалгана уу")
+    except smtplib.SMTPAuthenticationError as exc:
+        print(f"[EMAIL] Auth алдаа: {exc} — App Password шалгана уу")
         return False
     except Exception as exc:
-        print(f"[EMAIL] Илгээхэд алдаа гарлаа: {exc}")
+        print(f"[EMAIL] Илгээхэд алдаа гарлаа ({type(exc).__name__}): {exc}")
         return False
 
 
@@ -292,11 +292,16 @@ async def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(get_
         "expires": datetime.utcnow() + timedelta(minutes=10),
     }
 
-    # SMTP блок хийхгүйн тулд thread pool дээр ажиллуулна
+    # SMTP блок хийхгүйн тулд thread pool дээр, 15с timeout-тай ажиллуулна
     loop = asyncio.get_event_loop()
-    sent = await loop.run_in_executor(
-        _email_executor, _send_reset_email, req.email, code
-    )
+    try:
+        sent = await asyncio.wait_for(
+            loop.run_in_executor(_email_executor, _send_reset_email, req.email, code),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        print(f"[EMAIL] Timeout: 15с дотор илгээж чадсангүй ({req.email})")
+        sent = False
 
     if not sent:
         if SMTP_EMAIL and SMTP_PASSWORD:
