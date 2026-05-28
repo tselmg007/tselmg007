@@ -661,10 +661,12 @@ class SkillAnalysis(BaseModel):
     dynamics_score: int
     clarity_score: int
     consistency_score: int
+    pitch_score: int = 50
     tempo_feel: str
     rhythm_accuracy: str
     chord_clarity: str
     dynamic_range: str
+    pitch_accuracy: str = ""
     strengths: list[str]
     areas_to_improve: list[str]
     practice_tips: list[str]
@@ -692,6 +694,9 @@ class RawFeatures:
     active_note_count: int
     chroma_entropy: float
     mfcc_variance: float
+    pitch_accuracy: float = 0.5    # нотын тааруу байдал (0-1)
+    pitch_stability: float = 0.5   # нотын тогтвортой байдал (0-1)
+    voiced_ratio: float = 0.5      # тоглосон хугацааны хувь (0-1)
     chroma_vector: list[float] = None
 
 
@@ -806,6 +811,44 @@ def extract_features(audio_bytes: bytes) -> RawFeatures:
     norm = chroma_mean.sum() + 1e-9
     chroma_vector = [round(float(v / norm), 4) for v in chroma_mean]
 
+    # ── pyin: нотын тааруу байдал ──────────────────────────────────────────────
+    pitch_accuracy = 0.5
+    pitch_stability = 0.5
+    voiced_ratio = 0.5
+    try:
+        f0, voiced_flag, _ = librosa.pyin(
+            y,
+            fmin=librosa.note_to_hz('E2'),   # гитарын хамгийн нам нот
+            fmax=librosa.note_to_hz('E6'),   # гитарын хамгийн өндөр нот
+            sr=sr,
+            frame_length=2048,
+            hop_length=512,
+        )
+        valid = voiced_flag & ~np.isnan(f0)
+        voiced_f0 = f0[valid]
+        voiced_ratio = float(np.mean(voiced_flag)) if len(voiced_flag) > 0 else 0.0
+
+        if len(voiced_f0) > 10:
+            # Pitch accuracy: нот хэр тааруу байна (nearest semitone-аас хазайлт)
+            midi = 12 * np.log2(np.clip(voiced_f0, 1.0, None) / 440.0) + 69
+            cent_dev = np.abs(midi - np.round(midi)) * 100   # 0–50 cents
+            pitch_accuracy = float(max(0.0, 1.0 - np.mean(cent_dev) / 50.0))
+
+            # Pitch stability: дараалсан нотуудын хооронд том үсрэлт бага = тогтвортой
+            if len(voiced_f0) > 5:
+                semitone_jumps = np.abs(
+                    np.diff(12 * np.log2(voiced_f0[1:] / (voiced_f0[:-1] + 1e-9)))
+                )
+                pitch_stability = float(0.3 + np.mean(semitone_jumps < 2.0) * 0.7)
+            else:
+                pitch_stability = 0.4
+        else:
+            pitch_accuracy, pitch_stability = 0.3, 0.3
+
+        print(f"[PYIN] accuracy={pitch_accuracy:.2f} stability={pitch_stability:.2f} voiced={voiced_ratio:.2f}")
+    except Exception as e:
+        print(f"[PYIN] алдаа: {e}")
+
     return RawFeatures(
         duration_sec=round(duration, 1), sr=int(sr),
         tempo_bpm=round(tempo_bpm, 1),
@@ -822,6 +865,9 @@ def extract_features(audio_bytes: bytes) -> RawFeatures:
         active_note_count=active_notes,
         chroma_entropy=round(chroma_entropy, 3),
         mfcc_variance=round(mfcc_variance, 2),
+        pitch_accuracy=round(pitch_accuracy, 3),
+        pitch_stability=round(pitch_stability, 3),
+        voiced_ratio=round(voiced_ratio, 3),
         chroma_vector=chroma_vector,
     )
 
@@ -864,6 +910,13 @@ def score_consistency(f: RawFeatures) -> int:
     elif rate <= 10.0: rate_bonus = 0.0
     else: rate_bonus = -15.0
     return clamp(reg_score + rate_bonus)
+
+def score_pitch(f: RawFeatures) -> int:
+    # Нотын тааруу байдал (60%) + тогтвортой байдал (40%)
+    base = f.pitch_accuracy * 60.0 + f.pitch_stability * 40.0
+    # voiced_ratio бага бол тоглоогүй хугацаа их → жижиг penalty
+    voiced_penalty = max(0.0, (0.3 - f.voiced_ratio) * 30.0)
+    return clamp(base - voiced_penalty)
 
 
 def _chord_to_chroma(notes: list[str]) -> np.ndarray:
@@ -920,7 +973,7 @@ def level_from_score(score: int) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. FEEDBACK GENERATOR
 # ─────────────────────────────────────────────────────────────────────────────
-def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) -> dict:
+def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, p: int, total: int) -> dict:
     level = level_from_score(total)
     song  = detect_song(f)
     bpm   = f.tempo_bpm
@@ -945,8 +998,14 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
     elif d >= 50: dynamic_range = f"Дундаж ({f.dynamic_range_db:.0f} dB)"
     else: dynamic_range = f"Нарийн ({f.dynamic_range_db:.0f} dB) — динамик хяналт хэрэгтэй"
 
+    pitch_pct = int(f.pitch_accuracy * 100)
+    if p >= 75: pitch_feel = f"Нот тааруу ({pitch_pct}%) — нарийн сонсголтой тоглодог"
+    elif p >= 55: pitch_feel = f"Дундаж тааруу ({pitch_pct}%) — жижиг гажил байна"
+    else: pitch_feel = f"Гажилтай ({pitch_pct}%) — нотны тааруу байдал сайжруулах хэрэгтэй"
+
     strengths = []
     if r >= 65: strengths.append("Хэмнэл тогтвортой, beat алдагдахгүй тоглож байна")
+    if p >= 70: strengths.append("Нотны тааруу байдал сайн — чих нарийн тохируулагдсан")
     if d >= 65: strengths.append("Динамик хэлбэлзэл сайн — чанга/намхан хэсгийг ялган тоглодог")
     if cl >= 65: strengths.append("Аккорд тодорхой, string мулталт бага")
     if co >= 65: strengths.append("Цохилт тогтмол, strumming/picking жигд")
@@ -954,6 +1013,7 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
     if not strengths: strengths.append("Тоглох хүсэл эрмэлзэл харагдаж байна — дадлага үргэлжлүүлнэ үү")
 
     areas = []
+    if p < 55: areas.append("Нотны тааруу байдал — tuner ашиглан нот бүрийг нарийвчлан тохируул")
     if r < 60: areas.append("Хэмнэлийн тогтвортой байдал — метроном ашиглан дадлага хий")
     if cl < 55: areas.append("Аккордын дарлага — хуруу байрлал, дарах хүч нарийвчлах")
     if d < 50: areas.append("Динамик хяналт — нам ба чанга хэсгийг ухамсартайгаар ялгах")
@@ -962,11 +1022,11 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
     if not areas: areas.append("Илүү нарийн техник (vibrato, fingerpicking) сурах")
 
     tips = []
+    tips.append("Tuner ашиглан нот бүрийн тааруу байдлыг шалгаж, чихээ дадлагажуул." if p < 60
+                else "Нотны тааруу байдал сайн — vibrato болон бending техникийг нэмж сур.")
     tips.append("Метроном 70 BPM-с эхлээд дуртай дуугаа тоглох дадлага хий." if r < 65
                 else "Метроном ашиглаж байгаа бол BPM-ийг аажмаар ихэсгэж хурдыг нэмэгдүүл.")
     tips.append("Аккорд бүрийг тусад нь дарж, string бүр тод дуугарч байгааг шалга." if cl < 60
-                else "Аккорд шилжилтийн хурдыг нэмэх — Am→F→C→G дараалалд timer тавьж дадла.")
-    tips.append("Намхан болон чанга хэсгийг ухамсартайгаар тоглох дадлага хий." if d < 55
                 else "Fingerpicking техник нэмж, ганц нотоор melody тоглох дадлагыг туршиж үз.")
 
     level_desc = {"Beginner": "Эхлэгч түвшний тоглогч.",
@@ -974,6 +1034,7 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
                   "Advanced": "Дэвшилтэт түвшний тоглогч.",
                   "Professional": "Мэргэжлийн түвшний тоглогч."}[level]
     weak = []
+    if p < 55: weak.append("нотны тааруу байдал")
     if r < 60: weak.append("хэмнэл")
     if cl < 55: weak.append("аккордын тодрол")
     if d < 50: weak.append("динамик")
@@ -991,6 +1052,7 @@ def make_feedback(f: RawFeatures, r: int, d: int, cl: int, co: int, total: int) 
                 duration_seconds=f.duration_sec, tempo_bpm=f.tempo_bpm,
                 tempo_feel=tempo_feel, rhythm_accuracy=rhythm_accuracy,
                 chord_clarity=chord_clarity, dynamic_range=dynamic_range,
+                pitch_accuracy=pitch_feel,
                 strengths=strengths, areas_to_improve=areas,
                 practice_tips=tips, overall_feedback=overall)
 
@@ -1004,10 +1066,13 @@ def analyze_pipeline(audio_bytes: bytes) -> SkillAnalysis:
     d  = score_dynamics(f)
     cl = score_clarity(f)
     co = score_consistency(f)
-    total = clamp(r * 0.40 + d * 0.15 + cl * 0.25 + co * 0.20)
-    feedback = make_feedback(f, r, d, cl, co, total)
+    p  = score_pitch(f)
+    # Шинэ жин: rhythm 30% + pitch 25% + clarity 20% + consistency 15% + dynamics 10%
+    total = clamp(r * 0.30 + p * 0.25 + cl * 0.20 + co * 0.15 + d * 0.10)
+    feedback = make_feedback(f, r, d, cl, co, p, total)
     feedback["rhythm_score"] = r; feedback["dynamics_score"] = d
     feedback["clarity_score"] = cl; feedback["consistency_score"] = co
+    feedback["pitch_score"] = p
     return SkillAnalysis(**feedback)
 
 
